@@ -155,46 +155,14 @@ fn get_channel_params(
     Ok(channel_params)
 }
 
-// Calculate time difference in seconds between two timestamps
-fn calculate_dt(prev_ts: &str, curr_ts: &str) -> Result<f64, Box<dyn Error>> {
-    let format = "%Y-%m-%d %H:%M:%S";
-    let prev_dt = NaiveDateTime::parse_from_str(prev_ts, format)?;
-    let curr_dt = NaiveDateTime::parse_from_str(curr_ts, format)?;
-
-    let duration = curr_dt.signed_duration_since(prev_dt);
-    Ok(duration.num_seconds() as f64)
-}
-
-// Linear interpolation between two flow values
-fn interpolate_flow(
-    time1: &NaiveDateTime,
-    flow1: f64,
-    time2: &NaiveDateTime,
-    flow2: f64,
-    target_time: &NaiveDateTime,
-) -> f64 {
-    if time1 == time2 {
-        return flow1;
-    }
-
-    let total_seconds = (time2.signed_duration_since(*time1)).num_seconds() as f64;
-    let elapsed_seconds = (target_time.signed_duration_since(*time1)).num_seconds() as f64;
-
-    if total_seconds == 0.0 {
-        return flow1;
-    }
-
-    let ratio = elapsed_seconds / total_seconds;
-    flow1 + (flow2 - flow1) * ratio
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     // Hardcoded CSV file name and channel ID
-    let csv_file = "tests/ngen/nex-486889_output.csv";
+    let csv_file = "tests/ngen/nex-486889_long_output.csv";
     let channel_id = "wb-486888";
 
     // Set internal timestep to 5 minutes (300 seconds)
     let internal_timestep_seconds = 300.0;
+    let dt = internal_timestep_seconds;
 
     // Initialize SQLite connection
     let db_path = "tests/config/cat-486888_subset.gpkg";
@@ -266,64 +234,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("Number of internal timesteps: {}", timesteps.len());
-
-    // Previous values for interpolation
-    let mut prev_timestamp: Option<NaiveDateTime> = None;
-
+    let mut current_external_idx = 0;
+    let mut current_ql = 0.0;
     // Process each internal timestep
     for (step_idx, step_time) in timesteps.iter().enumerate() {
-        // Find the two data points to interpolate between
-        let mut prev_record_idx = 0;
-        let mut next_record_idx = 0;
-        let mut found = false;
-
-        for i in 0..all_records.len() - 1 {
-            let curr_time = NaiveDateTime::parse_from_str(&all_records[i].timestamp, format)?;
-            let next_time = NaiveDateTime::parse_from_str(&all_records[i + 1].timestamp, format)?;
-
-            if *step_time >= curr_time && *step_time <= next_time {
-                prev_record_idx = i;
-                next_record_idx = i + 1;
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            // If not found within intervals, use the closest record
-            if *step_time < start_time {
-                prev_record_idx = 0;
-                next_record_idx = 0;
-            } else {
-                prev_record_idx = all_records.len() - 1;
-                next_record_idx = all_records.len() - 1;
-            }
-        }
-
-        // Get the two data points and interpolate the lateral inflow
-        let prev_time =
-            NaiveDateTime::parse_from_str(&all_records[prev_record_idx].timestamp, format)?;
-        let next_time =
-            NaiveDateTime::parse_from_str(&all_records[next_record_idx].timestamp, format)?;
-        let prev_ql = all_records[prev_record_idx].ql;
-        let next_ql = all_records[next_record_idx].ql;
-
-        let interpolated_ql = interpolate_flow(&prev_time, prev_ql, &next_time, next_ql, step_time);
-        // dbg!(interpolated_ql);
-
-        // Calculate dt (time difference in seconds)
-        let dt = if let Some(prev_time) = prev_timestamp {
-            (step_time.signed_duration_since(prev_time)).num_seconds() as f64
-        } else {
-            internal_timestep_seconds // First timestep
-        };
+        // Find the two data points to interpolate between using binary search
+        current_external_idx = step_idx / 12;
+        current_ql = all_records[current_external_idx].ql;
 
         // Run the Muskingcunge routing function
         let (qdc, velc, depthc) = mc_kernel::submuskingcunge(
             state.qup,
             state.quc,
             state.qdp,
-            interpolated_ql,
+            current_ql,
             dt,
             channel_params.s0,
             channel_params.dx,
@@ -340,28 +264,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         results.push((
             step_idx,
             step_time.format("%Y-%m-%d %H:%M:%S").to_string(),
-            interpolated_ql,
+            current_ql,
             qdc,
             velc,
             depthc,
         ));
 
         // Update routing state for next iteration
-        state.update(interpolated_ql, qdc, depthc);
-        prev_timestamp = Some(*step_time);
-
-        // Print results every hour (to reduce console output)
-        if step_idx % 12 == 0 {
-            // For 5-minute timesteps, print every hour (12 steps)
-            // println!(
-            //     "Step: {}, Time: {}, QL: {:.6}, QDC: {:.6}, Velocity: {:.6}, Depth: {:.6}",
-            //     step_idx, step_time, interpolated_ql, qdc, velc, depthc
-            // );
-            println!(
-                "Time: {}, flow: {:.6}, Velocity: {:.6}, Depth: {:.6}",
-                step_time, qdc, velc, depthc
-            );
-        }
+        state.update(current_ql, qdc, depthc);
     }
 
     // Save results to output CSV
