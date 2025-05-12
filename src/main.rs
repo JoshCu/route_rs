@@ -1,13 +1,14 @@
 use chrono::{Duration, NaiveDateTime};
-use csv::{ReaderBuilder, StringRecord};
+use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use rusqlite::{Connection, Result as SqliteResult};
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
+use std::io::{BufReader, Write};
 use std::path::Path;
 
 mod mc_kernel;
+
 // Configuration structure for column name mapping
 #[derive(Debug, Clone)]
 struct ColumnConfig {
@@ -157,7 +158,7 @@ fn get_channel_params(
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Hardcoded CSV file name and channel ID
-    let csv_file = "tests/ngen/nex-486889_long_output.csv";
+    let csv_file = "tests/ngen/nex-486889_output.csv";
     let channel_id = "wb-486888";
 
     // Set internal timestep to 5 minutes (300 seconds)
@@ -185,38 +186,64 @@ fn main() -> Result<(), Box<dyn Error>> {
         channel_id, channel_params
     );
 
-    // Open CSV file and set up reader for the format with comma-delimited fields
+    // Open CSV file with buffered reader for better performance
     let file = File::open(csv_file)?;
+    let buffered_reader = BufReader::new(file);
+
     let mut rdr = ReaderBuilder::new()
         .has_headers(false)
         .delimiter(b',')
         .flexible(true)
         .trim(csv::Trim::All)
-        .from_reader(file);
+        .from_reader(buffered_reader);
 
-    // Read all records into memory for interpolation
-    let mut all_records: Vec<FlowData> = Vec::new();
-    for result in rdr.records() {
-        let record = result?;
-        let flow_data = FlowData::from_record(&record)?;
-        all_records.push(flow_data);
-    }
+    // Set up output CSV writer immediately to stream results
+    let output_path = Path::new("muskingcunge_results.csv");
+    let mut wtr = WriterBuilder::new()
+        .has_headers(true)
+        .from_path(output_path)?;
 
-    if all_records.is_empty() {
-        return Err("No records found in CSV file".into());
-    }
+    // Write header
+    wtr.write_record(&["step", "flow", "velocity", "depth"])?;
+
+    // Process the first record to get start time
+    let mut records = rdr.records();
+
+    let first_record = match records.next() {
+        Some(Ok(record)) => record,
+        Some(Err(e)) => return Err(format!("Error reading first record: {}", e).into()),
+        None => return Err("CSV file is empty".into()),
+    };
+
+    let first_data = FlowData::from_record(&first_record)?;
+    let format = "%Y-%m-%d %H:%M:%S";
+    let start_time = NaiveDateTime::parse_from_str(&first_data.timestamp, format)?;
+
+    // Initialize a time-indexed cache of external flow inputs
+    let mut external_flow_cache = HashMap::new();
+    external_flow_cache.insert(first_data.index, first_data.ql);
+
+    // Create a streaming buffer for the next records
+    let mut current_external_flow = first_data.ql;
 
     // Initialize routing state
     let mut state = RoutingState::new();
 
-    // Create results to store output
-    let mut results = Vec::new();
+    // Process remaining external flow records in the background
+    let mut max_external_idx = first_data.index;
 
-    // Parse the first and last timestamps to determine the simulation period
-    let format = "%Y-%m-%d %H:%M:%S";
-    let start_time = NaiveDateTime::parse_from_str(&all_records[0].timestamp, format)?;
-    let end_time =
-        NaiveDateTime::parse_from_str(&all_records[all_records.len() - 1].timestamp, format)?;
+    for result in records {
+        let record = result?;
+        let flow_data = FlowData::from_record(&record)?;
+        external_flow_cache.insert(flow_data.index, flow_data.ql);
+        if flow_data.index > max_external_idx {
+            max_external_idx = flow_data.index;
+        }
+    }
+
+    // Get end time from the highest index record
+    // Assuming the last record in the CSV has the highest index and represents the end time
+    let end_time = start_time + Duration::seconds((3600 * max_external_idx) as i64);
 
     println!("Simulation period: {} to {}", start_time, end_time);
     println!(
@@ -224,30 +251,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         internal_timestep_seconds
     );
 
-    // Create a vector of all internal timesteps
+    // Process each internal timestep directly
     let mut current_time = start_time;
-    let mut timesteps = Vec::new();
+    let mut step_idx = 0;
 
     while current_time <= end_time {
-        timesteps.push(current_time);
-        current_time = current_time + Duration::seconds(internal_timestep_seconds as i64);
-    }
+        // Calculate which external flow value to use
+        let current_external_idx = step_idx / 12;
 
-    println!("Number of internal timesteps: {}", timesteps.len());
-    let mut current_external_idx = 0;
-    let mut current_ql = 0.0;
-    // Process each internal timestep
-    for (step_idx, step_time) in timesteps.iter().enumerate() {
-        // Find the two data points to interpolate between using binary search
-        current_external_idx = step_idx / 12;
-        current_ql = all_records[current_external_idx].ql;
+        // Get external flow value from cache
+        if let Some(ql) = external_flow_cache.get(&current_external_idx) {
+            current_external_flow = *ql;
+        }
 
         // Run the Muskingcunge routing function
         let (qdc, velc, depthc) = mc_kernel::submuskingcunge(
             state.qup,
             state.quc,
             state.qdp,
-            current_ql,
+            current_external_flow,
             dt,
             channel_params.s0,
             channel_params.dx,
@@ -260,51 +282,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             state.depth_p,
         );
 
-        // Save results
-        results.push((
-            step_idx,
-            step_time.format("%Y-%m-%d %H:%M:%S").to_string(),
-            current_ql,
-            qdc,
-            velc,
-            depthc,
-        ));
-
-        // Update routing state for next iteration
-        state.update(current_ql, qdc, depthc);
-    }
-
-    // Save results to output CSV
-    write_results_to_csv(&results, "muskingcunge_results.csv")?;
-
-    println!("Processing complete. Results saved to muskingcunge_results.csv");
-    Ok(())
-}
-
-// Function to write results to CSV
-fn write_results_to_csv(
-    results: &[(usize, String, f64, f64, f64, f64)],
-    output_file: &str,
-) -> Result<(), Box<dyn Error>> {
-    let path = Path::new(output_file);
-    let mut wtr = csv::Writer::from_path(path)?;
-
-    // Write header
-    //wtr.write_record(&["step", "timestamp", "ql", "qdc", "velocity", "depth"])?;
-    wtr.write_record(&["step", "flow", "velocity", "depth"])?;
-    // Write data
-    for (step, timestamp, ql, qdc, velocity, depth) in results {
-        if step % 1 == 0 {
+        // Stream results to output file directly if this is an output timestep
+        if step_idx % 12 == 0 {
             wtr.write_record(&[
-                step.to_string(),
-                // timestamp.clone(),
+                step_idx.to_string(),
                 qdc.to_string(),
-                velocity.to_string(),
-                depth.to_string(),
+                velc.to_string(),
+                depthc.to_string(),
             ])?;
         }
+
+        // Update routing state for next iteration
+        state.update(current_external_flow, qdc, depthc);
+
+        // Advance to next timestep
+        current_time = current_time + Duration::seconds(internal_timestep_seconds as i64);
+        step_idx += 1;
     }
 
+    // Final flush to ensure all data is written
     wtr.flush()?;
+
+    println!("Processing complete. Results saved to muskingcunge_results.csv");
     Ok(())
 }
