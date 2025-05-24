@@ -41,7 +41,7 @@ pub fn process_timestep(
                     let (qup, qdp, depth_p) = (state.qup, state.qdp, state.depth_p);
 
                     // Run Muskingcunge routing
-                    let (qdc, velc, depthc) = mc_kernel::submuskingcunge(
+                    let (qdc, velc, depthc, _, _, _) = mc_kernel::submuskingcunge(
                         qup,
                         upstream_flow, // Use upstream flow as current upstream input
                         qdp,

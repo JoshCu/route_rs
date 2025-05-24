@@ -18,7 +18,7 @@ use state::NetworkState;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Configuration
-    let db_path = "tests/gage-10154200-no-cal/config/gage-10154200_subset.gpkg";
+    let db_path = "tests/gage-10154200/config/gage-10154200_subset.gpkg";
     let internal_timestep_seconds = 300.0;
     let dt = internal_timestep_seconds;
 
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_format = OutputFormat::NetCdf; // Change to Csv, NetCdf, or Both as needed
 
     // Directory containing CSV files (one per catchment)
-    let csv_dir = "tests/gage-10154200-no-cal/outputs/ngen/";
+    let csv_dir = "tests/gage-10154200/outputs/ngen/";
 
     // Initialize SQLite connection
     let conn = rusqlite::Connection::open(db_path)?;
