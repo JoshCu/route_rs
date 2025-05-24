@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let dt = internal_timestep_seconds;
 
     // Output format configuration (can be made a command-line argument)
-    let output_format = OutputFormat::Both; // Change to Csv, NetCdf, or Both as needed
+    let output_format = OutputFormat::NetCdf; // Change to Csv, NetCdf, or Both as needed
 
     // Directory containing CSV files (one per catchment)
     let csv_dir = "tests/gage-10154200-no-cal/outputs/ngen/";

@@ -1,6 +1,5 @@
-use crate::network::{NetworkTopology, NodeType, get_area_sqkm};
+use crate::network::{NetworkTopology, NodeType};
 use csv::{ReaderBuilder, StringRecord, Writer, WriterBuilder};
-use netcdf::rc::get;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::error::Error;

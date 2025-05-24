@@ -1,6 +1,5 @@
 use crate::config::{ChannelParams, ColumnConfig, OutputFormat};
 use crate::state::NetworkState;
-use rusqlite::ffi::SQLITE_ACCESS_READ;
 use rusqlite::{Connection, Result as SqliteResult};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
@@ -13,7 +12,6 @@ pub struct NetworkNode {
     pub downstream_id: Option<String>,
     pub upstream_ids: Vec<String>,
     pub node_type: NodeType,
-    pub divide_id: Option<String>,
     pub area_sqkm: Option<f64>,
 }
 
@@ -48,12 +46,7 @@ impl NetworkTopology {
             } else {
                 NodeType::Nexus
             },
-            divide_id: if id.starts_with("wb") {
-                Some(id.clone().replace("wb", "cat"))
-            } else {
-                None
-            },
-            area_sqkm: area_sqkm,
+            area_sqkm,
         };
         self.nodes.insert(id, node);
     }
@@ -290,7 +283,7 @@ pub fn load_channel_parameters(
                     }
                 }
                 Err(e) => {
-                    writeln!(lock, "Failed to load channel parameters for {}: {}", id, e);
+                    writeln!(lock, "Failed to load channel parameters for {}: {}", id, e)?;
                     continue;
                 }
             }

@@ -98,16 +98,17 @@ pub fn process_timestep(
                 let upstream_flow = network_state.get_upstream_flow(id, &node.upstream_ids);
                 network_state.update_flow(id, upstream_flow);
 
-                // Write junction results to CSV only
-                if step_idx % 12 == 0 {
-                    if let Some(wtr) = csv_writer {
-                        wtr.write_record(&[
-                            step_idx.to_string(),
-                            id.clone(),
-                            upstream_flow.to_string(),
-                            "0.0".to_string(),
-                            "0.0".to_string(),
-                        ])?;
+                if matches!(output_format, OutputFormat::Csv | OutputFormat::Both) {
+                    if step_idx % 12 == 0 {
+                        if let Some(wtr) = csv_writer {
+                            wtr.write_record(&[
+                                step_idx.to_string(),
+                                id.clone(),
+                                upstream_flow.to_string(),
+                                "0.0".to_string(),
+                                "0.0".to_string(),
+                            ])?;
+                        }
                     }
                 }
             }
