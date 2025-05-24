@@ -5,12 +5,13 @@ use crate::mc_kernel;
 use crate::network::{NetworkNode, NetworkTopology};
 use crate::state::NodeStatus;
 use csv::Writer;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fs::File;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 // Process all timesteps for a single node
 fn process_node_all_timesteps(
@@ -86,51 +87,89 @@ fn process_node_all_timesteps(
     results
 }
 
-// Worker function
+// Worker function with message queue pattern
 fn worker_thread(
-    work_queue: Arc<Vec<u32>>,
-    work_index: Arc<AtomicUsize>,
+    work_queue: Arc<Mutex<VecDeque<u32>>>,
+    completed_count: Arc<AtomicUsize>,
+    total_nodes: usize,
     topology: Arc<NetworkTopology>,
     channel_params_map: Arc<HashMap<u32, ChannelParams>>,
     max_timesteps: usize,
     dt: f32,
 ) {
-    loop {
-        // Get next work item
-        let idx = work_index.fetch_add(1, Ordering::Relaxed);
-        if idx >= work_queue.len() {
-            break;
-        }
+    let mut retry_count = HashMap::new();
 
-        let node_id = &work_queue[idx];
-        let topo = &topology;
-        // Check dependencies
-        let node = match topo.nodes.get(node_id) {
-            Some(node) => node,
-            None => continue,
+    loop {
+        // Try to get work from the queue
+        let node_id = {
+            let mut queue = work_queue.lock().unwrap();
+
+            // Check if we're done
+            if queue.is_empty() && completed_count.load(Ordering::Relaxed) >= total_nodes {
+                break;
+            }
+
+            queue.pop_front()
         };
 
-        // check if the status of all the upstream ids is
-        let upstream_status = node.upstream_ids.iter().all(|node_id| {
-            topo.nodes
-                .get(node_id)
-                .unwrap()
-                .status
-                .read()
-                .unwrap()
-                .eq(&NodeStatus::Ready)
+        // If no work available, wait a bit
+        let node_id = match node_id {
+            Some(id) => id,
+            None => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+        };
+
+        // Get node
+        let node = match topology.nodes.get(&node_id) {
+            Some(node) => node,
+            None => {
+                eprintln!("Node {} not found in topology", node_id);
+                completed_count.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        };
+
+        // Check if all upstream nodes are ready
+        let upstream_ready = node.upstream_ids.iter().all(|up_id| {
+            topology
+                .nodes
+                .get(up_id)
+                .and_then(|up_node| up_node.status.read().ok())
+                .map(|status| *status == NodeStatus::Ready)
+                .unwrap_or(false)
         });
 
-        if !upstream_status {
-            // Put back in queue
-            work_index.fetch_sub(1, Ordering::Relaxed);
+        if !upstream_ready {
+            // Track retry attempts to detect potential circular dependencies
+            let retries = retry_count.entry(node_id).or_insert(0);
+            *retries += 1;
+
+            // if *retries > 100 {
+            //     eprintln!(
+            //         "Node {} appears to have unresolvable dependencies after 100 retries",
+            //         node_id
+            //     );
+            //     completed_count.fetch_add(1, Ordering::Relaxed);
+            //     continue;
+            // }
+
+            // Put back at the end of the queue
+            {
+                let mut queue = work_queue.lock().unwrap();
+                queue.push_back(node_id);
+            }
+
+            // Yield to let other threads work
             thread::yield_now();
             continue;
         }
 
         // Process node
         if let Some(params) = channel_params_map.get(&node_id) {
-            let results = process_node_all_timesteps(node_id, &topology, params, max_timesteps, dt);
+            let results =
+                process_node_all_timesteps(&node_id, &topology, params, max_timesteps, dt);
 
             // Store results
             {
@@ -143,6 +182,9 @@ fn worker_thread(
                 *status = NodeStatus::Ready;
             }
         }
+
+        // Mark as completed
+        completed_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -186,25 +228,25 @@ pub fn process_routing_parallel(
     let depths = compute_depths(topology);
     let max_depth = *depths.values().max().unwrap_or(&0);
 
-    // Create work items sorted by depth (deepest first)
-    let mut work_items = Vec::new();
+    // Create work queue sorted by depth (deepest first)
+    let mut work_items = VecDeque::new();
     for depth_level in (0..=max_depth).rev() {
         for (&node_id, &depth) in &depths {
             if depth == depth_level {
-                work_items.push(node_id);
+                work_items.push_back(node_id);
             }
         }
     }
 
+    let total_nodes = work_items.len();
     println!(
         "Processing {} nodes with max depth {}",
-        work_items.len(),
-        max_depth
+        total_nodes, max_depth
     );
 
     // Shared state
-    let work_index = Arc::new(AtomicUsize::new(0));
-    let work_queue = Arc::new(work_items);
+    let work_queue = Arc::new(Mutex::new(work_items));
+    let completed_count = Arc::new(AtomicUsize::new(0));
     let topology_arc = Arc::new(topology.clone());
     let channel_params_arc = Arc::new(channel_params_map.clone());
 
@@ -212,13 +254,24 @@ pub fn process_routing_parallel(
     let num_threads = num_cpus::get();
     let mut handles = vec![];
 
-    for _ in 0..num_threads {
+    for i in 0..num_threads {
         let queue = Arc::clone(&work_queue);
+        let completed = Arc::clone(&completed_count);
         let topo = Arc::clone(&topology_arc);
         let params = Arc::clone(&channel_params_arc);
-        let index = Arc::clone(&work_index);
+
         let handle = thread::spawn(move || {
-            worker_thread(queue, index, topo, params, max_timesteps, dt);
+            println!("Worker {} started", i);
+            worker_thread(
+                queue,
+                completed,
+                total_nodes,
+                topo,
+                params,
+                max_timesteps,
+                dt,
+            );
+            println!("Worker {} finished", i);
         });
         handles.push(handle);
     }
@@ -226,6 +279,17 @@ pub fn process_routing_parallel(
     // Wait for completion
     for handle in handles {
         handle.join().unwrap();
+    }
+
+    // Verify all nodes were processed
+    let final_count = completed_count.load(Ordering::Relaxed);
+    if final_count != total_nodes {
+        eprintln!(
+            "Warning: Only {}/{} nodes were processed",
+            final_count, total_nodes
+        );
+    } else {
+        println!("Successfully processed all {} nodes", total_nodes);
     }
 
     println!("there are {} nodes", topology.nodes.len());

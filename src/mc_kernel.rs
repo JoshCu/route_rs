@@ -20,8 +20,8 @@ pub fn submuskingcunge(
     //
     #[inline(always)]
     fn pow_2_3(x: f32) -> f32 {
-        // x.powf(2.0 / 3.0)
-        x.sqrt().sqrt().sqrt().powi(5)
+        x.powf(2.0 / 3.0)
+        // x.sqrt().sqrt().sqrt().powi(5)
     }
 
     // Helper function to compute x^(5/3) efficiently
