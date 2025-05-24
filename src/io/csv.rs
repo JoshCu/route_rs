@@ -1,5 +1,6 @@
-use crate::network::NetworkTopology;
+use crate::network::{NetworkTopology, NodeType, get_area_sqkm};
 use csv::{ReaderBuilder, StringRecord, Writer, WriterBuilder};
+use netcdf::rc::get;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::error::Error;
@@ -16,14 +17,14 @@ struct FlowData {
 }
 
 impl FlowData {
-    fn from_record(record: &StringRecord) -> Result<Self, Box<dyn Error>> {
+    fn from_record(record: &StringRecord, qlat_index: usize) -> Result<Self, Box<dyn Error>> {
         if record.len() < 3 {
             return Err("Record has fewer than 3 fields".into());
         }
 
         let index = record[0].trim().parse::<usize>()?;
         let timestamp = record[1].trim().to_string();
-        let ql = record[2].trim().parse::<f64>()?;
+        let ql = record[qlat_index].trim().parse::<f64>()?;
 
         Ok(FlowData {
             index,
@@ -36,13 +37,15 @@ impl FlowData {
 // Function to load external flows for a specific nexus/catchment
 pub fn load_external_flows(
     csv_file: &str,
-    nexus_id: &str,
+    id: &str,
+    var_name: Option<&str>,
+    area: f64,
 ) -> Result<HashMap<usize, f64>, Box<dyn Error>> {
     let mut external_flows = HashMap::new();
 
     // Check if file exists, if not return empty flows
     if !Path::new(csv_file).exists() {
-        println!("No external flow file found for {}: {}", nexus_id, csv_file);
+        println!("No external flow file found for {}: {}", id, csv_file);
         return Ok(external_flows);
     }
 
@@ -50,22 +53,32 @@ pub fn load_external_flows(
     let buffered_reader = BufReader::new(file);
 
     let mut rdr = ReaderBuilder::new()
-        .has_headers(false)
+        .has_headers(true)
         .delimiter(b',')
         .flexible(true)
         .trim(csv::Trim::All)
         .from_reader(buffered_reader);
 
+    let qlat_index = match var_name {
+        Some(var_name) => {
+            let headers = rdr.headers()?;
+            headers.iter().position(|h| h == var_name).unwrap_or(2)
+        }
+        None => 2,
+    };
+
     for result in rdr.records() {
         let record = result?;
-        let flow_data = FlowData::from_record(&record)?;
-        external_flows.insert(flow_data.index, flow_data.ql);
+        let flow_data = FlowData::from_record(&record, qlat_index)?;
+        // https://github.com/CIROH-UA/ngen/blob/ed2a903730467fa631716c033b757c3dff5fa2bb/include/core/Layer.hpp#L142
+        let adjusted_flow = (flow_data.ql * (area * 1000000.0)) / 3600.0;
+        external_flows.insert(flow_data.index, adjusted_flow);
     }
 
     println!(
         "Loaded {} external flow records for {}",
         external_flows.len(),
-        nexus_id
+        id
     );
     Ok(external_flows)
 }
@@ -74,21 +87,31 @@ pub fn load_external_flows(
 pub fn load_external_flows_parallel(
     topology: &NetworkTopology,
     csv_dir: &str,
+    var_name: Option<&str>,
 ) -> HashMap<String, HashMap<usize, f64>> {
-    let nexus_ids: Vec<_> = topology.routing_order.clone();
+    let ids: Vec<_> = topology
+        .routing_order
+        .clone()
+        .into_par_iter()
+        .filter(|id| match topology.nodes.get(id) {
+            Some(node) => node.node_type == NodeType::Flowpath,
+            None => false,
+        })
+        .collect();
 
-    let flows: Vec<_> = nexus_ids
+    let flows: Vec<_> = ids
         .par_iter()
-        .map(|nexus_id| {
-            let csv_file = format!("{}{}_output.csv", csv_dir, nexus_id);
-            let flows = match load_external_flows(&csv_file, nexus_id) {
+        .map(|id| {
+            let csv_file = format!("{}{}.csv", csv_dir, id.replace("wb", "cat"));
+            let area = topology.nodes.get(id).unwrap().area_sqkm.unwrap();
+            let flows = match load_external_flows(&csv_file, id, var_name, area) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("Failed to load external flows for {}: {}", nexus_id, e);
+                    eprintln!("Failed to load external flows for {}: {}", id, e);
                     HashMap::new()
                 }
             };
-            (nexus_id.clone(), flows)
+            (id.clone(), flows)
         })
         .collect();
 
@@ -100,14 +123,7 @@ pub fn create_csv_writer(path: &str) -> Result<Writer<File>, Box<dyn Error>> {
     let mut wtr = WriterBuilder::new().has_headers(true).from_path(path)?;
 
     // Write header
-    wtr.write_record(&[
-        "step",
-        "nexus_id",
-        "channel_id",
-        "flow",
-        "velocity",
-        "depth",
-    ])?;
+    wtr.write_record(&["step", "feature_id", "flow", "velocity", "depth"])?;
 
     Ok(wtr)
 }

@@ -83,5 +83,9 @@ pub fn write_netcdf_output(
     )?;
     file.add_attribute("code_version", "")?;
 
+    // throwaway but expected
+    let _ = file.add_variable::<f32>("type", &["feature_id"])?;
+    let _ = file.add_variable::<f32>("nudge", &["feature_id"])?;
+
     Ok(())
 }

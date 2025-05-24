@@ -1,7 +1,7 @@
 use crate::config::{ChannelParams, OutputFormat};
 use crate::io::results::SimulationResults;
 use crate::mc_kernel;
-use crate::network::NetworkTopology;
+use crate::network::{NetworkTopology, NodeType};
 use crate::state::NetworkState;
 use csv::Writer;
 use std::collections::HashMap;
@@ -22,23 +22,22 @@ pub fn process_timestep(
     output_format: &OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
     // Process each node in topological order (MUST be serial due to dependencies)
-    for nexus_id in &topology.routing_order {
-        if let Some(node) = topology.nodes.get(nexus_id) {
-            if let Some(channel_id) = &node.channel_id {
-                if let Some(channel_params) = channel_params_map.get(nexus_id) {
+    for id in &topology.routing_order {
+        if let Some(node) = topology.nodes.get(id) {
+            if node.node_type == NodeType::Flowpath {
+                if let Some(channel_params) = channel_params_map.get(id) {
                     // Get external flow for this timestep
                     let external_flow = network_state
                         .external_flows
-                        .get(nexus_id)
+                        .get(id)
                         .and_then(|flows| flows.get(&current_external_idx))
                         .unwrap_or(&0.0);
 
                     // Get upstream flow (sum of all upstream nodes)
-                    let upstream_flow =
-                        network_state.get_upstream_flow(nexus_id, &node.upstream_nexuses);
+                    let upstream_flow = network_state.get_upstream_flow(id, &node.upstream_ids);
 
                     // Get current state values
-                    let state = network_state.states.get(nexus_id).unwrap();
+                    let state = network_state.states.get(id).unwrap();
                     let (qup, qdp, depth_p) = (state.qup, state.qdp, state.depth_p);
 
                     // Run Muskingcunge routing
@@ -60,10 +59,10 @@ pub fn process_timestep(
                     );
 
                     // Update network state
-                    network_state.update_flow(nexus_id, qdc);
+                    network_state.update_flow(id, qdc);
 
                     // Update routing state
-                    let state = network_state.states.get_mut(nexus_id).unwrap();
+                    let state = network_state.states.get_mut(id).unwrap();
                     state.update(upstream_flow, qdc, depthc);
 
                     // Write results at output timesteps (every hour)
@@ -73,8 +72,7 @@ pub fn process_timestep(
                             if let Some(wtr) = csv_writer {
                                 wtr.write_record(&[
                                     step_idx.to_string(),
-                                    nexus_id.clone(),
-                                    channel_id.clone(),
+                                    id.clone(),
                                     qdc.to_string(),
                                     velc.to_string(),
                                     depthc.to_string(),
@@ -84,7 +82,7 @@ pub fn process_timestep(
 
                         // Store for NetCDF if needed
                         if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
-                            if let Some(&feature_idx) = feature_map.get(nexus_id) {
+                            if let Some(&feature_idx) = feature_map.get(id) {
                                 sim_results.add_result(
                                     feature_idx,
                                     qdc as f32,
@@ -97,17 +95,15 @@ pub fn process_timestep(
                 }
             } else {
                 // Junction node - just pass through upstream flows
-                let upstream_flow =
-                    network_state.get_upstream_flow(nexus_id, &node.upstream_nexuses);
-                network_state.update_flow(nexus_id, upstream_flow);
+                let upstream_flow = network_state.get_upstream_flow(id, &node.upstream_ids);
+                network_state.update_flow(id, upstream_flow);
 
                 // Write junction results to CSV only
                 if step_idx % 12 == 0 {
                     if let Some(wtr) = csv_writer {
                         wtr.write_record(&[
                             step_idx.to_string(),
-                            nexus_id.clone(),
-                            "junction".to_string(),
+                            id.clone(),
                             upstream_flow.to_string(),
                             "0.0".to_string(),
                             "0.0".to_string(),

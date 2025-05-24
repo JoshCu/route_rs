@@ -8,14 +8,14 @@ pub struct ColumnConfig {
     pub ncc: String,
     pub s0: String,
     pub bw: String,
-    pub waterbody: String,
-    pub gages: String,
+    // pub waterbody: String,
+    // pub gages: String,
     pub tw: String,
     pub twcc: String,
-    pub musk: String,
-    pub musx: String,
+    // pub musk: String,
+    // pub musx: String,
     pub cs: String,
-    pub alt: String,
+    // pub alt: String,
 }
 
 impl ColumnConfig {
@@ -28,14 +28,14 @@ impl ColumnConfig {
             ncc: "nCC".to_string(),
             s0: "So".to_string(),
             bw: "BtmWdth".to_string(),
-            waterbody: "WaterbodyID".to_string(),
-            gages: "gage".to_string(),
+            // waterbody: "WaterbodyID".to_string(),
+            // gages: "gage".to_string(),
             tw: "TopWdth".to_string(),
             twcc: "TopWdthCC".to_string(),
-            musk: "MusK".to_string(),
-            musx: "MusX".to_string(),
+            // musk: "MusK".to_string(),
+            // musx: "MusX".to_string(),
             cs: "ChSlp".to_string(),
-            alt: "alt".to_string(),
+            // alt: "alt".to_string(),
         }
     }
 }

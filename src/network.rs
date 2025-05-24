@@ -1,16 +1,26 @@
 use crate::config::{ChannelParams, ColumnConfig, OutputFormat};
 use crate::state::NetworkState;
+use rusqlite::ffi::SQLITE_ACCESS_READ;
 use rusqlite::{Connection, Result as SqliteResult};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
+use std::io::{Write, stdout};
 
 // Network node representing a catchment/nexus
 #[derive(Debug, Clone)]
 pub struct NetworkNode {
-    pub nexus_id: String,
-    pub channel_id: Option<String>,
-    pub downstream_nexus: Option<String>,
-    pub upstream_nexuses: Vec<String>,
+    pub id: String,
+    pub downstream_id: Option<String>,
+    pub upstream_ids: Vec<String>,
+    pub node_type: NodeType,
+    pub divide_id: Option<String>,
+    pub area_sqkm: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeType {
+    Flowpath,
+    Nexus,
 }
 
 // Network topology
@@ -28,36 +38,41 @@ impl NetworkTopology {
         }
     }
 
-    pub fn add_node(
-        &mut self,
-        nexus_id: String,
-        channel_id: Option<String>,
-        downstream_nexus: Option<String>,
-    ) {
+    pub fn add_node(&mut self, id: String, downstream_id: Option<String>, area_sqkm: Option<f64>) {
         let node = NetworkNode {
-            nexus_id: nexus_id.clone(),
-            channel_id,
-            downstream_nexus,
-            upstream_nexuses: Vec::new(),
+            id: id.clone(),
+            downstream_id,
+            upstream_ids: Vec::new(),
+            node_type: if id.starts_with("wb") {
+                NodeType::Flowpath
+            } else {
+                NodeType::Nexus
+            },
+            divide_id: if id.starts_with("wb") {
+                Some(id.clone().replace("wb", "cat"))
+            } else {
+                None
+            },
+            area_sqkm: area_sqkm,
         };
-        self.nodes.insert(nexus_id, node);
+        self.nodes.insert(id, node);
     }
 
     pub fn build_upstream_connections(&mut self) {
         let mut upstream_map: HashMap<String, Vec<String>> = HashMap::new();
 
-        for (nexus_id, node) in &self.nodes {
-            if let Some(downstream) = &node.downstream_nexus {
+        for (id, node) in &self.nodes {
+            if let Some(downstream) = &node.downstream_id {
                 upstream_map
                     .entry(downstream.clone())
                     .or_insert_with(Vec::new)
-                    .push(nexus_id.clone());
+                    .push(id.clone());
             }
         }
 
-        for (nexus_id, upstreams) in upstream_map {
-            if let Some(node) = self.nodes.get_mut(&nexus_id) {
-                node.upstream_nexuses = upstreams;
+        for (id, upstreams) in upstream_map {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.upstream_ids = upstreams;
             }
         }
     }
@@ -67,12 +82,12 @@ impl NetworkTopology {
         let mut queue: VecDeque<String> = VecDeque::new();
 
         // Calculate in-degrees
-        for nexus_id in self.nodes.keys() {
-            in_degree.insert(nexus_id.clone(), 0);
+        for id in self.nodes.keys() {
+            in_degree.insert(id.clone(), 0);
         }
 
         for (_, node) in &self.nodes {
-            if let Some(downstream) = &node.downstream_nexus {
+            if let Some(downstream) = &node.downstream_id {
                 if let Some(degree) = in_degree.get_mut(downstream) {
                     *degree += 1;
                 }
@@ -80,9 +95,9 @@ impl NetworkTopology {
         }
 
         // Find nodes with no incoming edges (headwaters)
-        for (nexus_id, &degree) in &in_degree {
+        for (id, &degree) in &in_degree {
             if degree == 0 {
-                queue.push_back(nexus_id.clone());
+                queue.push_back(id.clone());
             }
         }
 
@@ -96,7 +111,7 @@ impl NetworkTopology {
             self.routing_order.push(current.clone());
 
             if let Some(node) = self.nodes.get(&current) {
-                if let Some(downstream) = &node.downstream_nexus {
+                if let Some(downstream) = &node.downstream_id {
                     if let Some(degree) = in_degree.get_mut(downstream) {
                         *degree -= 1;
                         if *degree == 0 {
@@ -120,6 +135,13 @@ impl NetworkTopology {
     }
 }
 
+pub fn get_area_sqkm(node_id: &str, conn: &Connection) -> Result<Option<f64>, Box<dyn Error>> {
+    let area_query = "SELECT areasqkm FROM 'divides' WHERE id = ?";
+    let mut stmt = conn.prepare(&area_query)?;
+    let row = stmt.query_row([node_id], |row| Ok(row.get::<_, Option<f64>>(0)?))?;
+    Ok(row)
+}
+
 // Function to build network topology from database
 pub fn build_network_topology(
     conn: &Connection,
@@ -137,57 +159,38 @@ pub fn build_network_topology(
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,         // wb or nexus id
-            row.get::<_, Option<String>>(1)?, // downstream nexus id
+            row.get::<_, Option<String>>(1)?, // downstream wb or nexus id
         ))
     })?;
 
     // Collect nexus relationships and all nexus IDs
-    let mut nexus_relationships = Vec::new();
-    let mut all_nexus_ids = HashSet::new();
+    let mut relationships = Vec::new();
+    let mut all_ids = HashSet::new();
 
     for row in rows {
-        let (nexus_id, downstream_nexus) = row?;
-        all_nexus_ids.insert(nexus_id.clone());
-        if let Some(ref ds) = downstream_nexus {
-            all_nexus_ids.insert(ds.clone());
+        let (id, downstream_id) = row?;
+        all_ids.insert(id.clone());
+        if let Some(ref ds) = downstream_id {
+            all_ids.insert(ds.clone());
         }
-        nexus_relationships.push((nexus_id, downstream_nexus));
+        relationships.push((id, downstream_id));
     }
 
-    // Query flowpaths table to find channel IDs for each nexus
-    let flowpath_query = format!(
-        "SELECT {} FROM 'flowpath-attributes' WHERE {} = ?",
-        config.key, config.downstream
-    );
-
-    let mut flowpath_stmt = conn.prepare(&flowpath_query)?;
-
     // Build topology
-    for (nexus_id, downstream_nexus) in nexus_relationships {
-        // Find corresponding channel ID by looking for flowpath where toid = nexus_id
-        let channel_id = match flowpath_stmt.query_row(rusqlite::params![&nexus_id], |row| {
-            Ok(row.get::<_, String>(0)?)
-        }) {
-            Ok(id) => Some(id),
-            Err(_) => None, // No channel found for this nexus (might be a junction)
-        };
-
+    for (id, downstream_id) in relationships {
         // Check if downstream nexus exists in the network
-        let validated_downstream = if let Some(ref ds) = downstream_nexus {
-            if all_nexus_ids.contains(ds) {
-                downstream_nexus
+        let validated_downstream = if let Some(ref ds) = downstream_id {
+            if all_ids.contains(ds) {
+                downstream_id
             } else {
-                println!(
-                    "Nexus {} flows to {} which is outside the domain",
-                    nexus_id, ds
-                );
+                println!("id {} flows to {} which is outside the domain", id, ds);
                 None
             }
         } else {
             None
         };
-
-        topology.add_node(nexus_id, channel_id, validated_downstream);
+        let area = get_area_sqkm(&id, &conn).unwrap_or(None);
+        topology.add_node(id, validated_downstream, area);
     }
 
     // Build upstream connections
@@ -202,7 +205,7 @@ pub fn build_network_topology(
         topology
             .nodes
             .values()
-            .filter(|n| n.downstream_nexus.is_none())
+            .filter(|n| n.downstream_id.is_none())
             .count()
     );
     println!("Routing order: {:?}", topology.routing_order);
@@ -266,32 +269,29 @@ pub fn load_channel_parameters(
     let mut channel_params_map = HashMap::new();
     let mut feature_map = HashMap::new();
     let mut features = Vec::new();
+    let mut lock = stdout().lock();
 
-    for nexus_id in &topology.routing_order {
-        network_state.initialize_node(nexus_id);
+    for id in &topology.routing_order {
+        network_state.initialize_node(id);
+        if let Some(node) = topology.nodes.get(id) {
+            if node.node_type == NodeType::Nexus {
+                continue;
+            }
+            match get_channel_params(conn, &node.id, config) {
+                Ok(params) => {
+                    writeln!(lock, "Loaded channel parameters for {}: {:?}", id, params)?;
+                    channel_params_map.insert(id.clone(), params);
 
-        if let Some(node) = topology.nodes.get(nexus_id) {
-            if let Some(channel_id) = &node.channel_id {
-                // Load channel parameters
-                match get_channel_params(conn, channel_id, config) {
-                    Ok(params) => {
-                        println!("Loaded channel parameters for {}: {:?}", channel_id, params);
-                        channel_params_map.insert(nexus_id.clone(), params);
-
-                        // Add to feature list for NetCDF
-                        if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
-                            let feature_id = channel_id.parse::<i64>().unwrap_or(-1);
-                            feature_map.insert(nexus_id.clone(), features.len());
-                            features.push((feature_id, "ch".to_string()));
-                        }
+                    // Add to feature list for NetCDF
+                    if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
+                        let feature_id = id.split('-').last().unwrap().parse::<i64>().unwrap();
+                        feature_map.insert(id.clone(), features.len());
+                        features.push((feature_id, "ch".to_string()));
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to load channel parameters for {}: {}",
-                            channel_id, e
-                        );
-                        continue;
-                    }
+                }
+                Err(e) => {
+                    writeln!(lock, "Failed to load channel parameters for {}: {}", id, e);
+                    continue;
                 }
             }
         }

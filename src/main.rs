@@ -18,7 +18,7 @@ use state::NetworkState;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Configuration
-    let db_path = "tests/gage-10154200/config/gage-10154200_subset.gpkg";
+    let db_path = "tests/gage-10154200-no-cal/config/gage-10154200_subset.gpkg";
     let internal_timestep_seconds = 300.0;
     let dt = internal_timestep_seconds;
 
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_format = OutputFormat::Both; // Change to Csv, NetCdf, or Both as needed
 
     // Directory containing CSV files (one per catchment)
-    let csv_dir = "tests/gage-10154200/outputs/ngen/";
+    let csv_dir = "tests/gage-10154200-no-cal/outputs/ngen/";
 
     // Initialize SQLite connection
     let conn = rusqlite::Connection::open(db_path)?;
@@ -42,7 +42,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Load external flows in parallel (this is I/O bound and benefits from parallelization)
     println!("Loading external flows in parallel...");
-    network_state.external_flows = load_external_flows_parallel(&topology, csv_dir);
+    let qlat_var = Some("Q_OUT");
+    network_state.external_flows = load_external_flows_parallel(&topology, csv_dir, qlat_var);
 
     // Load channel parameters and prepare features for NetCDF
     let (channel_params_map, feature_map, features) = network::load_channel_parameters(
