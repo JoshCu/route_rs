@@ -80,13 +80,12 @@ pub fn submuskingcunge(
     h = (depth_c * 1.33) + mindepth; // 1.50 of depth
     h_0 = depth_c * 0.67; // 0.50 of depth
 
-    let mut qdc: f64 = 0.0; // flow downstream current timestep
+    let qdc: f64; // flow downstream current timestep
     let mut velc: f64 = 0.0; // channel velocity
 
     // Only solve if there's water to flux
     if ql > 0.0 || qup > 0.0 || qdp > 0.0 {
         'outer: loop {
-            qj_0 = 0.0; // Initial flow of lower interval
             iter = 0;
 
             // Secant method loop
