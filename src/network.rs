@@ -1,9 +1,11 @@
 use crate::config::{ChannelParams, ColumnConfig, OutputFormat};
-use crate::state::NetworkState;
+use crate::state::NodeStatus;
 use rusqlite::{Connection, Result as SqliteResult};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{Write, stdout};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 
 // Network node representing a catchment/nexus
 #[derive(Debug, Clone)]
@@ -12,10 +14,32 @@ pub struct NetworkNode {
     pub downstream_id: Option<u32>,
     pub upstream_ids: Vec<u32>,
     pub area_sqkm: Option<f32>,
+    pub status: Arc<RwLock<NodeStatus>>,
+    pub qlat_file: PathBuf,
+    pub flow_storage: Arc<Mutex<Vec<(usize, f32, f32, f32)>>>,
+}
+
+impl NetworkNode {
+    pub fn new(
+        id: u32,
+        downstream_id: Option<u32>,
+        area_sqkm: Option<f32>,
+        qlat_file: PathBuf,
+    ) -> Self {
+        NetworkNode {
+            id,
+            downstream_id,
+            upstream_ids: Vec::new(),
+            area_sqkm,
+            status: Arc::new(RwLock::new(NodeStatus::NotReady)),
+            qlat_file,
+            flow_storage: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
 }
 
 // Network topology
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NetworkTopology {
     pub nodes: HashMap<u32, NetworkNode>,
     pub routing_order: Vec<u32>,
@@ -29,13 +53,19 @@ impl NetworkTopology {
         }
     }
 
-    pub fn add_node(&mut self, id: u32, downstream_id: Option<u32>, area_sqkm: Option<f32>) {
-        let node = NetworkNode {
-            id: id.clone(),
+    pub fn add_node(
+        &mut self,
+        id: u32,
+        downstream_id: Option<u32>,
+        area_sqkm: Option<f32>,
+        qlat_file: &str,
+    ) {
+        let node = NetworkNode::new(
+            id.clone(),
             downstream_id,
-            upstream_ids: Vec::new(),
             area_sqkm,
-        };
+            PathBuf::from(qlat_file),
+        );
         self.nodes.insert(id, node);
     }
 
@@ -79,6 +109,8 @@ impl NetworkTopology {
         for (id, &degree) in &in_degree {
             if degree == 0 {
                 queue.push_back(id.clone());
+                let mut lock = self.nodes.get_mut(id).unwrap().status.write().unwrap();
+                *lock = NodeStatus::Ready;
             }
         }
 
@@ -128,6 +160,7 @@ pub fn get_area_sqkm(node_id: &u32, conn: &Connection) -> Result<Option<f32>, Bo
 pub fn build_network_topology(
     conn: &Connection,
     config: &ColumnConfig,
+    csv_dir: &str,
 ) -> Result<NetworkTopology, Box<dyn Error>> {
     let mut topology = NetworkTopology::new();
 
@@ -167,7 +200,6 @@ pub fn build_network_topology(
         });
         relationships.push((n_id, n_downstream_id));
     }
-
     // Build topology
     for (id, downstream_id) in relationships {
         // Check if downstream nexus exists in the network
@@ -181,12 +213,9 @@ pub fn build_network_topology(
         } else {
             None
         };
-        let area = get_area_sqkm(&id, &conn).unwrap_or(None);
-        if let Some(area) = area {
-            topology.add_node(id, validated_downstream, Some(area));
-        }
-
-        topology.add_node(id, validated_downstream, area);
+        let area = get_area_sqkm(&id, &conn).unwrap();
+        let qlat_file_path = format!("{}cat-{}.csv", csv_dir, id);
+        topology.add_node(id, validated_downstream, area, &qlat_file_path);
     }
 
     // Build upstream connections
@@ -253,23 +282,14 @@ pub fn load_channel_parameters(
     conn: &Connection,
     topology: &NetworkTopology,
     config: &ColumnConfig,
-    network_state: &mut NetworkState,
     output_format: &OutputFormat,
-) -> Result<
-    (
-        HashMap<u32, ChannelParams>,
-        HashMap<u32, usize>,
-        Vec<(i64, String)>,
-    ),
-    Box<dyn Error>,
-> {
+) -> Result<(HashMap<u32, ChannelParams>, HashMap<u32, usize>, Vec<i64>), Box<dyn Error>> {
     let mut channel_params_map = HashMap::new();
     let mut feature_map = HashMap::new();
     let mut features = Vec::new();
     let mut lock = stdout().lock();
 
     for id in &topology.routing_order {
-        network_state.initialize_node(id.clone());
         match get_channel_params(conn, id, config) {
             Ok(params) => {
                 writeln!(lock, "Loaded channel parameters for {}: {:?}", id, params)?;
@@ -278,7 +298,7 @@ pub fn load_channel_parameters(
                 // Add to feature list for NetCDF
                 if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
                     feature_map.insert(id.clone(), features.len());
-                    features.push((i64::from(id.clone()), "wb".to_string()));
+                    features.push(i64::from(id.clone()));
                 }
             }
             Err(e) => {

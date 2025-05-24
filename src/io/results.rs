@@ -21,10 +21,10 @@ impl SimulationResults {
         }
     }
 
-    pub fn initialize_features(&mut self, features: Vec<(i64, String)>) {
-        for (id, ftype) in features {
-            self.feature_ids.push(id);
-            self.feature_types.push(ftype);
+    pub fn initialize_features(&mut self, features: &Vec<i64>) {
+        for id in features {
+            self.feature_ids.push(id.clone());
+            self.feature_types.push("wb".to_string());
             self.flow_data.push(Vec::new());
             self.velocity_data.push(Vec::new());
             self.depth_data.push(Vec::new());
@@ -35,9 +35,15 @@ impl SimulationResults {
         self.times.push(time);
     }
 
-    pub fn add_result(&mut self, feature_idx: usize, flow: f32, velocity: f32, depth: f32) {
-        self.flow_data[feature_idx].push(flow);
-        self.velocity_data[feature_idx].push(velocity);
-        self.depth_data[feature_idx].push(depth);
+    pub fn add_result(&mut self, feature_idx: usize, kernel_output: Vec<(usize, f32, f32, f32)>) {
+        println!("Adding result for feature {}", feature_idx);
+        println!("Kernel output length: {}", kernel_output.len());
+        for (index, flow, velocity, depth) in kernel_output {
+            if index % 12 == 0 {
+                self.flow_data[feature_idx].push(flow);
+                self.velocity_data[feature_idx].push(velocity);
+                self.depth_data[feature_idx].push(depth);
+            }
+        }
     }
 }
