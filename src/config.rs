@@ -51,12 +51,12 @@ pub enum OutputFormat {
 // Channel parameters from SQLite
 #[derive(Debug, Clone)]
 pub struct ChannelParams {
-    pub dx: f64,
-    pub n: f64,
-    pub ncc: f64,
-    pub s0: f64,
-    pub bw: f64,
-    pub tw: f64,
-    pub twcc: f64,
-    pub cs: f64,
+    pub dx: f32,
+    pub n: f32,
+    pub ncc: f32,
+    pub s0: f32,
+    pub bw: f32,
+    pub tw: f32,
+    pub twcc: f32,
+    pub cs: f32,
 }

@@ -12,7 +12,7 @@ use std::path::Path;
 struct FlowData {
     index: usize,
     timestamp: String,
-    ql: f64,
+    ql: f32,
 }
 
 impl FlowData {
@@ -23,7 +23,7 @@ impl FlowData {
 
         let index = record[0].trim().parse::<usize>()?;
         let timestamp = record[1].trim().to_string();
-        let ql = record[qlat_index].trim().parse::<f64>()?;
+        let ql = record[qlat_index].trim().parse::<f32>()?;
 
         Ok(FlowData {
             index,
@@ -38,8 +38,8 @@ pub fn load_external_flows(
     csv_file: &str,
     id: &str,
     var_name: Option<&str>,
-    area: f64,
-) -> Result<HashMap<usize, f64>, Box<dyn Error>> {
+    area: f32,
+) -> Result<HashMap<usize, f32>, Box<dyn Error>> {
     let mut external_flows = HashMap::new();
 
     // Check if file exists, if not return empty flows
@@ -87,7 +87,7 @@ pub fn load_external_flows_parallel(
     topology: &NetworkTopology,
     csv_dir: &str,
     var_name: Option<&str>,
-) -> HashMap<String, HashMap<usize, f64>> {
+) -> HashMap<String, HashMap<usize, f32>> {
     let ids: Vec<_> = topology
         .routing_order
         .clone()

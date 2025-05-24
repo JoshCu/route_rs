@@ -15,7 +15,7 @@ pub fn process_timestep(
     channel_params_map: &HashMap<String, ChannelParams>,
     feature_map: &HashMap<String, usize>,
     current_external_idx: usize,
-    dt: f64,
+    dt: f32,
     step_idx: usize,
     csv_writer: &mut Option<Writer<File>>,
     sim_results: &mut SimulationResults,

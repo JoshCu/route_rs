@@ -12,7 +12,7 @@ pub struct NetworkNode {
     pub downstream_id: Option<String>,
     pub upstream_ids: Vec<String>,
     pub node_type: NodeType,
-    pub area_sqkm: Option<f64>,
+    pub area_sqkm: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,7 +36,7 @@ impl NetworkTopology {
         }
     }
 
-    pub fn add_node(&mut self, id: String, downstream_id: Option<String>, area_sqkm: Option<f64>) {
+    pub fn add_node(&mut self, id: String, downstream_id: Option<String>, area_sqkm: Option<f32>) {
         let node = NetworkNode {
             id: id.clone(),
             downstream_id,
@@ -128,10 +128,10 @@ impl NetworkTopology {
     }
 }
 
-pub fn get_area_sqkm(node_id: &str, conn: &Connection) -> Result<Option<f64>, Box<dyn Error>> {
+pub fn get_area_sqkm(node_id: &str, conn: &Connection) -> Result<Option<f32>, Box<dyn Error>> {
     let area_query = "SELECT areasqkm FROM 'divides' WHERE id = ?";
     let mut stmt = conn.prepare(&area_query)?;
-    let row = stmt.query_row([node_id], |row| Ok(row.get::<_, Option<f64>>(0)?))?;
+    let row = stmt.query_row([node_id], |row| Ok(row.get::<_, Option<f32>>(0)?))?;
     Ok(row)
 }
 
