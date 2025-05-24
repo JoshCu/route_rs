@@ -28,7 +28,7 @@ impl RoutingState {
 }
 
 // Network state manager
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct NetworkState {
     pub states: HashMap<u32, RoutingState>,
     pub current_flows: HashMap<u32, f32>,

@@ -13,7 +13,7 @@ use io::{
     csv::load_external_flows_parallel, netcdf::write_netcdf_output, results::SimulationResults,
 };
 use network::build_network_topology;
-use routing::process_timestep;
+use routing::process_timestep_parallel;
 use state::NetworkState;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -36,6 +36,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Build network topology
     let topology = build_network_topology(&conn, &column_config)?;
+
+    // Break up the network into segments for parallel processing
+    let segments = topology.identify_segments();
+    println!(
+        "Identified {} network segments for parallel processing",
+        segments.len()
+    );
 
     // Initialize network state
     let mut network_state = NetworkState::new();
@@ -102,8 +109,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // Process the timestep
-        process_timestep(
+        process_timestep_parallel(
             &topology,
+            &segments,
             &mut network_state,
             &channel_params_map,
             &feature_map,

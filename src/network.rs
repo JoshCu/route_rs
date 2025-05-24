@@ -290,3 +290,118 @@ pub fn load_channel_parameters(
 
     Ok((channel_params_map, feature_map, features))
 }
+
+// Add to network.rs
+
+use rayon::prelude::*;
+
+#[derive(Debug, Clone)]
+pub struct NetworkSegment {
+    pub id: usize,
+    pub nodes: Vec<u32>,              // Nodes in topological order within segment
+    pub confluence_node: Option<u32>, // Where this segment joins another
+    pub depends_on: Vec<usize>,       // Segment IDs this depends on
+}
+
+impl NetworkTopology {
+    // Identify network segments that can be processed in parallel
+    pub fn identify_segments(&self) -> Vec<NetworkSegment> {
+        let mut segments = Vec::new();
+        let mut node_to_segment: HashMap<u32, usize> = HashMap::new();
+        let mut current_segment = Vec::new();
+        let mut segment_id = 0;
+
+        // Find confluence nodes (nodes with multiple upstream connections)
+        let confluence_nodes: HashSet<u32> = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.upstream_ids.len() > 1)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for &node_id in &self.routing_order {
+            let node = &self.nodes[&node_id];
+
+            // Check if this is a confluence point or downstream of confluence
+            let is_confluence = confluence_nodes.contains(&node_id);
+            let has_confluence_upstream = node
+                .upstream_ids
+                .iter()
+                .any(|up| confluence_nodes.contains(up));
+
+            if is_confluence || (has_confluence_upstream && !current_segment.is_empty()) {
+                // End current segment
+                if !current_segment.is_empty() {
+                    let confluence = if is_confluence { Some(node_id) } else { None };
+                    segments.push(NetworkSegment {
+                        id: segment_id,
+                        nodes: current_segment.clone(),
+                        confluence_node: confluence,
+                        depends_on: Vec::new(),
+                    });
+
+                    // Map nodes to segments
+                    for &n in &current_segment {
+                        node_to_segment.insert(n, segment_id);
+                    }
+
+                    segment_id += 1;
+                    current_segment.clear();
+                }
+            }
+
+            current_segment.push(node_id);
+        }
+
+        // Don't forget the last segment
+        if !current_segment.is_empty() {
+            segments.push(NetworkSegment {
+                id: segment_id,
+                nodes: current_segment.clone(),
+                confluence_node: None,
+                depends_on: Vec::new(),
+            });
+
+            for &n in &current_segment {
+                node_to_segment.insert(n, segment_id);
+            }
+        }
+
+        // Determine segment dependencies
+        for segment in &mut segments {
+            let mut deps = HashSet::new();
+
+            if let Some(first_node_id) = segment.nodes.first() {
+                if let Some(first_node) = self.nodes.get(first_node_id) {
+                    for upstream_id in &first_node.upstream_ids {
+                        if let Some(&upstream_segment) = node_to_segment.get(upstream_id) {
+                            if upstream_segment != segment.id {
+                                deps.insert(upstream_segment);
+                            }
+                        }
+                    }
+                }
+            }
+
+            segment.depends_on = deps.into_iter().collect();
+        }
+
+        segments
+    }
+
+    // Get segments that can be processed in parallel (no dependencies on unprocessed segments)
+    pub fn get_parallel_segments(
+        &self,
+        segments: &[NetworkSegment],
+        processed: &HashSet<usize>,
+    ) -> Vec<usize> {
+        segments
+            .iter()
+            .filter(|seg| {
+                !processed.contains(&seg.id)
+                    && seg.depends_on.iter().all(|dep| processed.contains(dep))
+            })
+            .map(|seg| seg.id)
+            .collect()
+    }
+}
