@@ -30,9 +30,9 @@ impl RoutingState {
 // Network state manager
 #[derive(Debug)]
 pub struct NetworkState {
-    pub states: HashMap<String, RoutingState>,
-    pub current_flows: HashMap<String, f32>,
-    pub external_flows: HashMap<String, HashMap<usize, f32>>,
+    pub states: HashMap<u32, RoutingState>,
+    pub current_flows: HashMap<u32, f32>,
+    pub external_flows: HashMap<u32, HashMap<usize, f32>>,
 }
 
 impl NetworkState {
@@ -44,20 +44,19 @@ impl NetworkState {
         }
     }
 
-    pub fn initialize_node(&mut self, nexus_id: &str) {
-        self.states
-            .insert(nexus_id.to_string(), RoutingState::new());
-        self.current_flows.insert(nexus_id.to_string(), 0.0);
+    pub fn initialize_node(&mut self, id: u32) {
+        self.states.insert(id, RoutingState::new());
+        self.current_flows.insert(id, 0.0);
     }
 
-    pub fn get_upstream_flow(&self, _nexus_id: &str, upstream_nexuses: &[String]) -> f32 {
+    pub fn get_upstream_flow(&self, _id: &u32, upstream_nexuses: &[u32]) -> f32 {
         upstream_nexuses
             .iter()
             .map(|upstream| self.current_flows.get(upstream).unwrap_or(&0.0))
             .sum()
     }
 
-    pub fn update_flow(&mut self, nexus_id: &str, flow: f32) {
-        self.current_flows.insert(nexus_id.to_string(), flow);
+    pub fn update_flow(&mut self, id: &u32, flow: f32) {
+        self.current_flows.insert(id.clone(), flow);
     }
 }

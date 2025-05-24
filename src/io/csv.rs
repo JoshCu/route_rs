@@ -1,4 +1,4 @@
-use crate::network::{NetworkTopology, NodeType};
+use crate::network::NetworkTopology;
 use csv::{ReaderBuilder, StringRecord, Writer, WriterBuilder};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -36,7 +36,7 @@ impl FlowData {
 // Function to load external flows for a specific nexus/catchment
 pub fn load_external_flows(
     csv_file: &str,
-    id: &str,
+    id: &u32,
     var_name: Option<&str>,
     area: f32,
 ) -> Result<HashMap<usize, f32>, Box<dyn Error>> {
@@ -87,21 +87,13 @@ pub fn load_external_flows_parallel(
     topology: &NetworkTopology,
     csv_dir: &str,
     var_name: Option<&str>,
-) -> HashMap<String, HashMap<usize, f32>> {
-    let ids: Vec<_> = topology
-        .routing_order
-        .clone()
-        .into_par_iter()
-        .filter(|id| match topology.nodes.get(id) {
-            Some(node) => node.node_type == NodeType::Flowpath,
-            None => false,
-        })
-        .collect();
+) -> HashMap<u32, HashMap<usize, f32>> {
+    let ids: Vec<_> = topology.routing_order.clone();
 
     let flows: Vec<_> = ids
         .par_iter()
         .map(|id| {
-            let csv_file = format!("{}{}.csv", csv_dir, id.replace("wb", "cat"));
+            let csv_file = format!("{}cat-{}.csv", csv_dir, id);
             let area = topology.nodes.get(id).unwrap().area_sqkm.unwrap();
             let flows = match load_external_flows(&csv_file, id, var_name, area) {
                 Ok(f) => f,
