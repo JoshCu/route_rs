@@ -14,15 +14,15 @@ use routing::process_routing_parallel;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Configuration
-    let db_path = "tests/gage-10154200/config/gage-10154200_subset.gpkg";
-    let internal_timestep_seconds = 300.0;
-    let dt = internal_timestep_seconds;
+    let db_path = "/home/josh/raid/savalan_run/config/gage-10126000_subset.gpkg";
+    let internal_timestep_seconds = 3600;
+    let dt = internal_timestep_seconds as f32;
 
     // Output format configuration (can be made a command-line argument)
     let output_format = OutputFormat::NetCdf; // Change to Csv, NetCdf, or Both as needed
 
     // Directory containing CSV files (one per catchment)
-    let csv_dir = "tests/gage-10154200/outputs/ngen/";
+    let csv_dir = "/home/josh/raid/savalan_run/outputs/ngen/";
 
     // Initialize SQLite connection
     let conn = rusqlite::Connection::open(db_path)?;
@@ -60,7 +60,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let end_time = start_time + Duration::seconds((3600 * max_external_steps) as i64);
 
     // Calculate total timesteps (internal)
-    let total_timesteps = (max_external_steps + 1) * 12;
+    let total_timesteps =
+        (max_external_steps + 1) * (max_external_steps / internal_timestep_seconds);
 
     println!("Simulation period: {} to {}", start_time, end_time);
     println!(

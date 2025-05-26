@@ -2,16 +2,15 @@ use crate::config::{ChannelParams, OutputFormat};
 use crate::io::csv::load_external_flows;
 use crate::io::results::SimulationResults;
 use crate::mc_kernel;
-use crate::network::{NetworkNode, NetworkTopology};
+use crate::network::NetworkTopology;
 use crate::state::NodeStatus;
 use csv::Writer;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fs::File;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 // Process all timesteps for a single node
 fn process_node_all_timesteps(
@@ -50,6 +49,12 @@ fn process_node_all_timesteps(
 
     let mut aggregated_flows = VecDeque::from(aggregated_flows);
 
+    let s0 = if channel_params.s0 == 0.0 {
+        0.00001
+    } else {
+        channel_params.s0
+    };
+
     for timestep in 0..max_timesteps {
         // Get external flow
         let external_flow = external_flows.pop_front().unwrap_or(0.0);
@@ -72,7 +77,7 @@ fn process_node_all_timesteps(
             qdp,
             external_flow,
             dt,
-            channel_params.s0,
+            s0,
             channel_params.dx,
             channel_params.n,
             channel_params.cs,
@@ -97,18 +102,15 @@ fn worker_thread(
     max_timesteps: usize,
     dt: f32,
 ) {
-    let mut retry_count = HashMap::new();
+    // let mut retry_count = HashMap::new();
 
     loop {
         // Try to get work from the queue
         let node_id = {
-            let mut queue = work_queue.lock().unwrap();
-
-            // Check if we're done
-            if queue.is_empty() && completed_count.load(Ordering::Relaxed) >= total_nodes {
+            if completed_count.load(Ordering::Relaxed) >= total_nodes {
                 break;
             }
-
+            let mut queue = work_queue.lock().unwrap();
             queue.pop_front()
         };
 
@@ -116,7 +118,7 @@ fn worker_thread(
         let node_id = match node_id {
             Some(id) => id,
             None => {
-                thread::sleep(Duration::from_millis(50));
+                thread::yield_now();
                 continue;
             }
         };
@@ -143,8 +145,8 @@ fn worker_thread(
 
         if !upstream_ready {
             // Track retry attempts to detect potential circular dependencies
-            let retries = retry_count.entry(node_id).or_insert(0);
-            *retries += 1;
+            // let retries = retry_count.entry(node_id).or_insert(0);
+            // *retries += 1;
 
             // if *retries > 100 {
             //     eprintln!(
@@ -160,7 +162,6 @@ fn worker_thread(
                 let mut queue = work_queue.lock().unwrap();
                 queue.push_back(node_id);
             }
-
             // Yield to let other threads work
             thread::yield_now();
             continue;
@@ -181,10 +182,9 @@ fn worker_thread(
                 let mut status = node.status.write().unwrap();
                 *status = NodeStatus::Ready;
             }
+            // Mark as completed
+            completed_count.fetch_add(1, Ordering::Relaxed);
         }
-
-        // Mark as completed
-        completed_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 

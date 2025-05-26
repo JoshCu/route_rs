@@ -39,7 +39,8 @@ impl SimulationResults {
         println!("Adding result for feature {}", feature_idx);
         println!("Kernel output length: {}", kernel_output.len());
         for (index, flow, velocity, depth) in kernel_output {
-            if index % 12 == 0 {
+            {
+                // if index % 12 == 0 {
                 self.flow_data[feature_idx].push(flow);
                 self.velocity_data[feature_idx].push(velocity);
                 self.depth_data[feature_idx].push(depth);
