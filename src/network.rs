@@ -4,7 +4,7 @@ use rusqlite::{Connection, Result as SqliteResult};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{Write, stdout};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 // Network node representing a catchment/nexus

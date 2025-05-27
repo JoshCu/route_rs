@@ -1,11 +1,10 @@
-use crate::network::NetworkTopology;
 use csv::{ReaderBuilder, StringRecord, Writer, WriterBuilder};
-use rayon::prelude::*;
-use std::collections::{HashMap, VecDeque};
+
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // Flow data from CSV
 #[derive(Debug)]
@@ -77,41 +76,8 @@ pub fn load_external_flows(
         let adjusted_flow = (flow_data.ql * (area * 1000000.0)) / 3600.0;
         external_flows.push(adjusted_flow);
     }
-
-    println!(
-        "Loaded {} external flow records for {}",
-        external_flows.len(),
-        id
-    );
     Ok(VecDeque::from(external_flows))
 }
-
-// // Parallel loading of external flows
-// pub fn load_external_flows_parallel(
-//     topology: &NetworkTopology,
-//     csv_dir: &str,
-//     var_name: Option<&str>,
-// ) -> HashMap<u32, HashMap<usize, f32>> {
-//     let ids: Vec<_> = topology.routing_order.clone();
-
-//     let flows: Vec<_> = ids
-//         .par_iter()
-//         .map(|id| {
-//             let csv_file = format!("{}cat-{}.csv", csv_dir, id);
-//             let area = topology.nodes.get(id).unwrap().area_sqkm.unwrap();
-//             let flows = match load_external_flows(&csv_file, id, var_name, area) {
-//                 Ok(f) => f,
-//                 Err(e) => {
-//                     eprintln!("Failed to load external flows for {}: {}", id, e);
-//                     HashMap::new()
-//                 }
-//             };
-//             (id.clone(), flows)
-//         })
-//         .collect();
-
-//     flows.into_iter().collect()
-// }
 
 // Create CSV writer with headers
 pub fn create_csv_writer(path: &str) -> Result<Writer<File>, Box<dyn Error>> {

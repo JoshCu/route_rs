@@ -36,9 +36,9 @@ impl SimulationResults {
     }
 
     pub fn add_result(&mut self, feature_idx: usize, kernel_output: Vec<(usize, f32, f32, f32)>) {
-        println!("Adding result for feature {}", feature_idx);
-        println!("Kernel output length: {}", kernel_output.len());
-        for (index, flow, velocity, depth) in kernel_output {
+        // println!("Adding result for feature {}", feature_idx);
+        // println!("Kernel output length: {}", kernel_output.len());
+        for (_, flow, velocity, depth) in kernel_output {
             {
                 // if index % 12 == 0 {
                 self.flow_data[feature_idx].push(flow);

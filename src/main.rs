@@ -1,5 +1,6 @@
 use chrono::{Duration, NaiveDateTime};
 use std::error::Error;
+// mod cli;
 mod config;
 mod io;
 mod mc_kernel;
@@ -7,6 +8,7 @@ mod network;
 mod routing;
 mod state;
 
+// use cli::get_args;
 use config::{ColumnConfig, OutputFormat};
 use io::{netcdf::write_netcdf_output, results::SimulationResults};
 use network::build_network_topology;
@@ -14,7 +16,8 @@ use routing::process_routing_parallel;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Configuration
-    let db_path = "/home/josh/raid/savalan_run/config/gage-10126000_subset.gpkg";
+    // let (_, csv_dir, db_path, internal_timestep_seconds) = get_args();
+    let db_path = "/home/josh/work/gage-10154200/config/gage-10154200_subset.gpkg";
     let internal_timestep_seconds = 3600;
     let dt = internal_timestep_seconds as f32;
 
@@ -22,7 +25,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let output_format = OutputFormat::NetCdf; // Change to Csv, NetCdf, or Both as needed
 
     // Directory containing CSV files (one per catchment)
-    let csv_dir = "/home/josh/raid/savalan_run/outputs/ngen/";
+    let csv_dir = "/home/josh/work/gage-10154200/outputs/ngen/";
 
     // Initialize SQLite connection
     let conn = rusqlite::Connection::open(db_path)?;
@@ -60,8 +63,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let end_time = start_time + Duration::seconds((3600 * max_external_steps) as i64);
 
     // Calculate total timesteps (internal)
+    let external_timestep_seconds = 3600;
     let total_timesteps =
-        (max_external_steps + 1) * (max_external_steps / internal_timestep_seconds);
+        (max_external_steps + 1) * (external_timestep_seconds / internal_timestep_seconds);
 
     println!("Simulation period: {} to {}", start_time, end_time);
     println!(
@@ -72,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Total internal timesteps: {}", total_timesteps);
 
     // Add timesteps to results for NetCDF
-    let time_steps = (0..=max_external_steps)
+    let _time_steps = (0..=max_external_steps)
         .map(|step| {
             let time_seconds = (step * 3600) as f64;
             sim_results.add_timestep(time_seconds);

@@ -2,9 +2,9 @@
 pub enum NodeStatus {
     NotReady,
     Ready,
-    DoneRunning,
-    DoneWriting,
-    Completed,
+    // DoneRunning,
+    // DoneWriting,
+    // Completed,
 }
 
 // pub fn get_upstream_flow(&self, _id: &u32, upstream_nexuses: &[u32]) -> f32 {
