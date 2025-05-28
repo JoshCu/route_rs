@@ -10,7 +10,7 @@ mod state;
 
 use cli::get_args;
 use config::{ColumnConfig, OutputFormat};
-use io::{netcdf::write_netcdf_output, results::SimulationResults};
+use io::{netcdf::init_netcdf_output, results::SimulationResults};
 use network::build_network_topology;
 use routing::process_routing_parallel;
 
@@ -34,12 +34,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Load channel parameters and prepare features for NetCDF
     let (channel_params_map, feature_map, features) =
         network::load_channel_parameters(&conn, &topology, &column_config, &output_format)?;
-
-    // Initialize simulation results for NetCDF
-    let mut sim_results = SimulationResults::new();
-    if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
-        sim_results.initialize_features(&features);
-    }
 
     // Set up CSV output if needed
     let mut csv_writer = if matches!(output_format, OutputFormat::Csv | OutputFormat::Both) {
@@ -74,38 +68,35 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Total internal timesteps: {}", total_timesteps);
 
     // Add timesteps to results for NetCDF
-    let _time_steps = (0..=max_external_steps)
+    let timesteps = (0..=max_external_steps)
         .map(|step| {
             let time_seconds = (step * 3600) as f64;
-            sim_results.add_timestep(time_seconds);
             time_seconds
         })
         .collect::<Vec<f64>>();
+    let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
+    let mut netcdf_writer = init_netcdf_output(
+        &nc_filename,
+        topology.routing_order.len(),
+        timesteps,
+        &reference_time,
+    )
+    .unwrap();
 
     // Run parallel routing
     println!("Starting parallel wave-front routing...");
     process_routing_parallel(
         &topology,
         &channel_params_map,
-        &feature_map,
         total_timesteps,
         dt,
-        &mut csv_writer,
-        &mut sim_results,
-        &output_format,
-        &features,
+        netcdf_writer,
     )?;
 
     // Final flush for CSV
     if let Some(mut wtr) = csv_writer {
         wtr.flush()?;
         println!("CSV results saved to network_routing_results.csv");
-    }
-    // Write NetCDF output if needed
-    if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
-        let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
-        write_netcdf_output(&nc_filename, &sim_results, &reference_time)?;
-        println!("NetCDF results saved to {}", nc_filename);
     }
 
     println!("Network routing complete.");

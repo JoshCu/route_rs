@@ -16,7 +16,7 @@ pub struct NetworkNode {
     pub area_sqkm: Option<f32>,
     pub status: Arc<RwLock<NodeStatus>>,
     pub qlat_file: PathBuf,
-    pub flow_storage: Arc<Mutex<Vec<(usize, f32, f32, f32)>>>,
+    pub inflow_storage: Arc<Mutex<VecDeque<f32>>>,
 }
 
 impl NetworkNode {
@@ -33,7 +33,7 @@ impl NetworkNode {
             area_sqkm,
             status: Arc::new(RwLock::new(NodeStatus::NotReady)),
             qlat_file,
-            flow_storage: Arc::new(Mutex::new(Vec::new())),
+            inflow_storage: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 }

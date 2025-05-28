@@ -1,16 +1,19 @@
 use crate::config::{ChannelParams, OutputFormat};
 use crate::io::csv::load_external_flows;
+use crate::io::netcdf::write_output;
 use crate::io::results::SimulationResults;
 use crate::mc_kernel;
 use crate::network::NetworkTopology;
 use crate::state::NodeStatus;
 use csv::Writer;
+use netcdf::FileMut;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fs::File;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 // Process all timesteps for a single node
 fn process_node_all_timesteps(
@@ -19,9 +22,9 @@ fn process_node_all_timesteps(
     channel_params: &ChannelParams,
     max_timesteps: usize,
     dt: f32,
-) -> Vec<(usize, f32, f32, f32)> {
+) -> SimulationResults {
     let node = topology.nodes.get(&node_id).unwrap();
-    let mut results = Vec::with_capacity(max_timesteps);
+    let mut results = SimulationResults::new(node.id as i64);
     let mut external_flows = load_external_flows(
         node.qlat_file.clone(),
         &node.id,
@@ -30,45 +33,24 @@ fn process_node_all_timesteps(
     )
     .unwrap_or_default();
 
-    let aggregated_flows: Vec<f32> = {
-        let sums: HashMap<usize, f32> = node
-            .upstream_ids
-            .iter()
-            .filter_map(|&up_id| topology.nodes.get(&up_id))
-            .flat_map(|upstream_node| upstream_node.flow_storage.lock().unwrap().clone())
-            .fold(HashMap::new(), |mut acc, (key, v1, _, _)| {
-                *acc.entry(key).or_insert(0.0) += v1;
-                acc
-            });
-
-        // Sort by key, then extract just the values
-        let mut sorted: Vec<_> = sums.into_iter().collect();
-        sorted.sort_by_key(|&(k, _)| k);
-        sorted.into_iter().map(|(_, v)| v).collect()
-    };
-
-    let mut aggregated_flows = VecDeque::from(aggregated_flows);
-
     let s0 = if channel_params.s0 == 0.0 {
         0.00001
     } else {
         channel_params.s0
     };
 
+    let mut inflow = node.inflow_storage.lock().unwrap();
+
+    let mut qup = 0.0;
+    let mut qdp = 0.0;
+    let mut depth_p = 0.0;
+
     for timestep in 0..max_timesteps {
         // Get external flow
         let external_flow = external_flows.pop_front().unwrap_or(0.0);
 
         // Get upstream flow
-        let upstream_flow = aggregated_flows.pop_front().unwrap_or(0.0);
-
-        // Get previous state
-        let (qup, qdp, depth_p) = if timestep == 0 {
-            (0.0, 0.0, 0.0)
-        } else {
-            let (_, prev_qdc, _, prev_depthc) = results[timestep - 1];
-            (upstream_flow, prev_qdc, prev_depthc)
-        };
+        let upstream_flow = inflow.pop_front().unwrap_or(0.0);
 
         // Run routing
         let (qdc, velc, depthc, _, _, _) = mc_kernel::submuskingcunge(
@@ -87,7 +69,14 @@ fn process_node_all_timesteps(
             channel_params.ncc,
             depth_p,
         );
-        results.push((timestep, qdc, velc, depthc));
+        results.flow_data.push(qdc);
+        results.velocity_data.push(velc);
+        results.depth_data.push(depthc);
+
+        // Update previous state
+        qup = upstream_flow;
+        qdp = qdc;
+        depth_p = depthc;
     }
     results
 }
@@ -101,9 +90,8 @@ fn worker_thread(
     channel_params_map: Arc<HashMap<u32, ChannelParams>>,
     max_timesteps: usize,
     dt: f32,
+    output_file: Arc<Mutex<FileMut>>,
 ) {
-    // let mut retry_count = HashMap::new();
-
     loop {
         // Try to get work from the queue
         let node_id = {
@@ -118,6 +106,7 @@ fn worker_thread(
         let node_id = match node_id {
             Some(id) => id,
             None => {
+                thread::sleep(Duration::from_millis(50));
                 thread::yield_now();
                 continue;
             }
@@ -144,25 +133,13 @@ fn worker_thread(
         });
 
         if !upstream_ready {
-            // Track retry attempts to detect potential circular dependencies
-            // let retries = retry_count.entry(node_id).or_insert(0);
-            // *retries += 1;
-
-            // if *retries > 100 {
-            //     eprintln!(
-            //         "Node {} appears to have unresolvable dependencies after 100 retries",
-            //         node_id
-            //     );
-            //     completed_count.fetch_add(1, Ordering::Relaxed);
-            //     continue;
-            // }
-
             // Put back at the end of the queue
             {
                 let mut queue = work_queue.lock().unwrap();
                 queue.push_back(node_id);
             }
             // Yield to let other threads work
+            thread::sleep(Duration::from_millis(50));
             thread::yield_now();
             continue;
         }
@@ -174,13 +151,27 @@ fn worker_thread(
 
             // Store results
             {
-                let mut buffer = node.flow_storage.lock().unwrap();
-                if buffer.is_empty() {
-                    buffer.extend(results);
+                // write results to netcdf
+                let _ = write_output(&output_file, &results);
+                let down_streamnode = topology.nodes[&node_id].downstream_id;
+                if let Some(down_streamnode) = down_streamnode {
+                    let mut buffer = topology.nodes[&down_streamnode]
+                        .inflow_storage
+                        .lock()
+                        .unwrap();
+                    if buffer.is_empty() {
+                        buffer.resize(results.flow_data.len(), 0.0);
+                    }
+                    for q in 0..buffer.len() {
+                        buffer[q] += results.flow_data[q];
+                    }
                 }
                 println!("done with node {}", node_id);
                 let mut status = node.status.write().unwrap();
                 *status = NodeStatus::Ready;
+                // clear this nodes inflow storage
+                let mut old_inflow = topology.nodes[&node_id].inflow_storage.lock().unwrap();
+                old_inflow.clear();
             }
             // Mark as completed
             completed_count.fetch_add(1, Ordering::Relaxed);
@@ -216,13 +207,9 @@ fn compute_depths(topology: &NetworkTopology) -> HashMap<u32, usize> {
 pub fn process_routing_parallel(
     topology: &NetworkTopology,
     channel_params_map: &HashMap<u32, ChannelParams>,
-    feature_map: &HashMap<u32, usize>,
     max_timesteps: usize,
     dt: f32,
-    csv_writer: &mut Option<Writer<File>>,
-    sim_results: &mut SimulationResults,
-    output_format: &OutputFormat,
-    features: &Vec<i64>,
+    output_file: Arc<Mutex<FileMut>>,
 ) -> Result<(), Box<dyn Error>> {
     // Compute node depths and create work queue
     let depths = compute_depths(topology);
@@ -259,6 +246,7 @@ pub fn process_routing_parallel(
         let completed = Arc::clone(&completed_count);
         let topo = Arc::clone(&topology_arc);
         let params = Arc::clone(&channel_params_arc);
+        let output = Arc::clone(&output_file);
 
         let handle = thread::spawn(move || {
             println!("Worker {} started", i);
@@ -270,6 +258,7 @@ pub fn process_routing_parallel(
                 params,
                 max_timesteps,
                 dt,
+                output,
             );
             println!("Worker {} finished", i);
         });
@@ -293,12 +282,6 @@ pub fn process_routing_parallel(
     }
 
     println!("there are {} nodes", topology.nodes.len());
-
-    for (key, node) in topology.nodes.iter() {
-        let feature_idx = features.iter().position(|f| *f == *key as i64).unwrap();
-        let output = node.flow_storage.lock().unwrap().clone();
-        sim_results.add_result(feature_idx, output);
-    }
 
     Ok(())
 }
