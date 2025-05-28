@@ -98,6 +98,25 @@ pub fn write_output(
         .lock()
         .map_err(|e| anyhow::anyhow!("Failed to acquire NetCDF file lock: {}", e))?;
 
+    // figure out the downsampling that needs to be done
+    let expected_timesteps = file
+        .dimension("time")
+        .ok_or_else(|| anyhow::anyhow!("time dimension not found"))?;
+    let actual_timesteps = results.flow_data.len();
+    let downsampling = actual_timesteps / expected_timesteps.len();
+    let mut downsampled_flow_data = Vec::with_capacity(expected_timesteps.len());
+    let mut downsampled_velocity_data = Vec::with_capacity(expected_timesteps.len());
+    let mut downsampled_depth_data = Vec::with_capacity(expected_timesteps.len());
+    for i in 0..actual_timesteps {
+        let d = i * downsampling;
+        if d >= results.flow_data.len() {
+            continue;
+        }
+        downsampled_flow_data.push(results.flow_data[d]);
+        downsampled_velocity_data.push(results.velocity_data[d]);
+        downsampled_depth_data.push(results.depth_data[d]);
+    }
+
     // Get feature variable
     let mut feature_var = file
         .variable_mut("feature_id")
@@ -112,7 +131,7 @@ pub fn write_output(
         .variable_mut("flow")
         .ok_or_else(|| anyhow::anyhow!("flow variable not found"))?;
     flow_var
-        .put_values(&results.flow_data, (fidx, ..))
+        .put_values(&downsampled_flow_data, (fidx, ..))
         .context("Failed to write flow data")?;
 
     // Velocity variable
@@ -120,7 +139,7 @@ pub fn write_output(
         .variable_mut("velocity")
         .ok_or_else(|| anyhow::anyhow!("velocity variable not found"))?;
     velocity_var
-        .put_values(&results.velocity_data, (fidx, ..))
+        .put_values(&downsampled_velocity_data, (fidx, ..))
         .context("Failed to write velocity data")?;
 
     // Depth variable
@@ -128,7 +147,7 @@ pub fn write_output(
         .variable_mut("depth")
         .ok_or_else(|| anyhow::anyhow!("depth variable not found"))?;
     depth_var
-        .put_values(&results.depth_data, (fidx, ..))
+        .put_values(&downsampled_depth_data, (fidx, ..))
         .context("Failed to write depth data")?;
 
     Ok(())
