@@ -1,36 +1,10 @@
-use csv::{ReaderBuilder, StringRecord, Writer, WriterBuilder};
+use csv::{ReaderBuilder, Writer, WriterBuilder};
 
 use std::collections::VecDeque;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-
-// Flow data from CSV
-#[derive(Debug)]
-struct FlowData {
-    index: usize,
-    timestamp: String,
-    ql: f32,
-}
-
-impl FlowData {
-    fn from_record(record: &StringRecord, qlat_index: usize) -> Result<Self, Box<dyn Error>> {
-        if record.len() < 3 {
-            return Err("Record has fewer than 3 fields".into());
-        }
-
-        let index = record[0].trim().parse::<usize>()?;
-        let timestamp = record[1].trim().to_string();
-        let ql = record[qlat_index].trim().parse::<f32>()?;
-
-        Ok(FlowData {
-            index,
-            timestamp,
-            ql,
-        })
-    }
-}
 
 // Function to load external flows for a specific nexus/catchment
 pub fn load_external_flows(
@@ -71,9 +45,10 @@ pub fn load_external_flows(
 
     for result in rdr.records() {
         let record = result?;
-        let flow_data = FlowData::from_record(&record, qlat_index)?;
+        let ql = record[qlat_index].trim().parse::<f32>()?;
+
         // https://github.com/CIROH-UA/ngen/blob/ed2a903730467fa631716c033b757c3dff5fa2bb/include/core/Layer.hpp#L142
-        let adjusted_flow = (flow_data.ql * (area * 1000000.0)) / 3600.0;
+        let adjusted_flow = (ql * (area * 1000000.0)) / 3600.0;
         external_flows.push(adjusted_flow);
     }
     Ok(VecDeque::from(external_flows))

@@ -1,6 +1,6 @@
 use chrono::{Duration, NaiveDateTime};
 use std::error::Error;
-// mod cli;
+mod cli;
 mod config;
 mod io;
 mod mc_kernel;
@@ -8,7 +8,7 @@ mod network;
 mod routing;
 mod state;
 
-// use cli::get_args;
+use cli::get_args;
 use config::{ColumnConfig, OutputFormat};
 use io::{netcdf::write_netcdf_output, results::SimulationResults};
 use network::build_network_topology;
@@ -16,16 +16,11 @@ use routing::process_routing_parallel;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Configuration
-    // let (_, csv_dir, db_path, internal_timestep_seconds) = get_args();
-    let db_path = "/home/josh/work/gage-10154200/config/gage-10154200_subset.gpkg";
-    let internal_timestep_seconds = 3600;
+    let (_, csv_dir, db_path, internal_timestep_seconds) = get_args();
     let dt = internal_timestep_seconds as f32;
 
     // Output format configuration (can be made a command-line argument)
     let output_format = OutputFormat::NetCdf; // Change to Csv, NetCdf, or Both as needed
-
-    // Directory containing CSV files (one per catchment)
-    let csv_dir = "/home/josh/work/gage-10154200/outputs/ngen/";
 
     // Initialize SQLite connection
     let conn = rusqlite::Connection::open(db_path)?;
@@ -55,8 +50,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // read the last line of one of the cat files to get the last time step
     let first_id = features.get(0).unwrap().clone();
-    let file_name = format!("{}cat-{}.csv", csv_dir, first_id);
-    let max_external_steps = std::fs::read_to_string(&file_name)?.lines().count() - 1;
+    let file_name = csv_dir.join(format!("cat-{}.csv", first_id));
+    let max_external_steps = std::fs::read_to_string(file_name.as_path())?
+        .lines()
+        .count()
+        - 1;
 
     let reference_time = NaiveDateTime::parse_from_str("2000-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")?;
     let start_time = reference_time;

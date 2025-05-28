@@ -58,14 +58,9 @@ impl NetworkTopology {
         id: u32,
         downstream_id: Option<u32>,
         area_sqkm: Option<f32>,
-        qlat_file: &str,
+        qlat_file: PathBuf,
     ) {
-        let node = NetworkNode::new(
-            id.clone(),
-            downstream_id,
-            area_sqkm,
-            PathBuf::from(qlat_file),
-        );
+        let node = NetworkNode::new(id.clone(), downstream_id, area_sqkm, qlat_file);
         self.nodes.insert(id, node);
     }
 
@@ -160,7 +155,7 @@ pub fn get_area_sqkm(node_id: &u32, conn: &Connection) -> Result<Option<f32>, Bo
 pub fn build_network_topology(
     conn: &Connection,
     config: &ColumnConfig,
-    csv_dir: &str,
+    csv_dir: &PathBuf,
 ) -> Result<NetworkTopology, Box<dyn Error>> {
     let mut topology = NetworkTopology::new();
 
@@ -214,8 +209,8 @@ pub fn build_network_topology(
             None
         };
         let area = get_area_sqkm(&id, &conn).unwrap();
-        let qlat_file_path = format!("{}cat-{}.csv", csv_dir, id);
-        topology.add_node(id, validated_downstream, area, &qlat_file_path);
+        let qlat_file_path = csv_dir.join(format!("cat-{}.csv", id));
+        topology.add_node(id, validated_downstream, area, qlat_file_path);
     }
 
     // Build upstream connections
