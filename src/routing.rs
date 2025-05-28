@@ -1,15 +1,14 @@
-use crate::config::{ChannelParams, OutputFormat};
+use crate::config::ChannelParams;
 use crate::io::csv::load_external_flows;
 use crate::io::netcdf::write_output;
 use crate::io::results::SimulationResults;
 use crate::mc_kernel;
 use crate::network::NetworkTopology;
 use crate::state::NodeStatus;
-use csv::Writer;
+use anyhow::{Context, Result};
+use indicatif::ProgressBar;
 use netcdf::FileMut;
 use std::collections::{HashMap, VecDeque};
-use std::error::Error;
-use std::fs::File;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,16 +21,21 @@ fn process_node_all_timesteps(
     channel_params: &ChannelParams,
     max_timesteps: usize,
     dt: f32,
-) -> SimulationResults {
-    let node = topology.nodes.get(&node_id).unwrap();
+) -> Result<SimulationResults> {
+    let node = topology.nodes.get(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node {} not found", node_id))?;
+    
     let mut results = SimulationResults::new(node.id as i64);
+    
+    let area = node.area_sqkm
+        .ok_or_else(|| anyhow::anyhow!("Node {} has no area defined", node_id))?;
+    
     let mut external_flows = load_external_flows(
         node.qlat_file.clone(),
         &node.id,
         None,
-        node.area_sqkm.unwrap(),
-    )
-    .unwrap_or_default();
+        area,
+    )?;
 
     let s0 = if channel_params.s0 == 0.0 {
         0.00001
@@ -39,13 +43,14 @@ fn process_node_all_timesteps(
         channel_params.s0
     };
 
-    let mut inflow = node.inflow_storage.lock().unwrap();
+    let mut inflow = node.inflow_storage.lock()
+        .map_err(|e| anyhow::anyhow!("Failed to lock inflow storage: {}", e))?;
 
     let mut qup = 0.0;
     let mut qdp = 0.0;
     let mut depth_p = 0.0;
 
-    for timestep in 0..max_timesteps {
+    for _timestep in 0..max_timesteps {
         // Get external flow
         let external_flow = external_flows.pop_front().unwrap_or(0.0);
 
@@ -69,6 +74,7 @@ fn process_node_all_timesteps(
             channel_params.ncc,
             depth_p,
         );
+        
         results.flow_data.push(qdc);
         results.velocity_data.push(velc);
         results.depth_data.push(depthc);
@@ -78,7 +84,8 @@ fn process_node_all_timesteps(
         qdp = qdc;
         depth_p = depthc;
     }
-    results
+    
+    Ok(results)
 }
 
 // Worker function with message queue pattern
@@ -91,14 +98,18 @@ fn worker_thread(
     max_timesteps: usize,
     dt: f32,
     output_file: Arc<Mutex<FileMut>>,
-) {
+    progress_bar: Arc<ProgressBar>,
+) -> Result<()> {
     loop {
+        // Check if all work is done
+        if completed_count.load(Ordering::Relaxed) >= total_nodes {
+            break;
+        }
+
         // Try to get work from the queue
         let node_id = {
-            if completed_count.load(Ordering::Relaxed) >= total_nodes {
-                break;
-            }
-            let mut queue = work_queue.lock().unwrap();
+            let mut queue = work_queue.lock()
+                .map_err(|e| anyhow::anyhow!("Failed to lock work queue: {}", e))?;
             queue.pop_front()
         };
 
@@ -118,6 +129,7 @@ fn worker_thread(
             None => {
                 eprintln!("Node {} not found in topology", node_id);
                 completed_count.fetch_add(1, Ordering::Relaxed);
+                progress_bar.inc(1);
                 continue;
             }
         };
@@ -135,7 +147,8 @@ fn worker_thread(
         if !upstream_ready {
             // Put back at the end of the queue
             {
-                let mut queue = work_queue.lock().unwrap();
+                let mut queue = work_queue.lock()
+                    .map_err(|e| anyhow::anyhow!("Failed to lock work queue: {}", e))?;
                 queue.push_back(node_id);
             }
             // Yield to let other threads work
@@ -146,37 +159,48 @@ fn worker_thread(
 
         // Process node
         if let Some(params) = channel_params_map.get(&node_id) {
-            let results =
-                process_node_all_timesteps(&node_id, &topology, params, max_timesteps, dt);
-
-            // Store results
-            {
-                // write results to netcdf
-                let _ = write_output(&output_file, &results);
-                let down_streamnode = topology.nodes[&node_id].downstream_id;
-                if let Some(down_streamnode) = down_streamnode {
-                    let mut buffer = topology.nodes[&down_streamnode]
-                        .inflow_storage
-                        .lock()
-                        .unwrap();
-                    if buffer.is_empty() {
-                        buffer.resize(results.flow_data.len(), 0.0);
+            match process_node_all_timesteps(&node_id, &topology, params, max_timesteps, dt) {
+                Ok(results) => {
+                    // Write results to netcdf
+                    write_output(&output_file, &results)?;
+                    
+                    // Pass flow to downstream node if exists
+                    if let Some(downstream_id) = topology.nodes[&node_id].downstream_id {
+                        if let Some(downstream_node) = topology.nodes.get(&downstream_id) {
+                            let mut buffer = downstream_node.inflow_storage.lock()
+                                .map_err(|e| anyhow::anyhow!("Failed to lock downstream buffer: {}", e))?;
+                            if buffer.is_empty() {
+                                buffer.resize(results.flow_data.len(), 0.0);
+                            }
+                            for (i, &flow) in results.flow_data.iter().enumerate() {
+                                if i < buffer.len() {
+                                    buffer[i] += flow;
+                                }
+                            }
+                        }
                     }
-                    for q in 0..buffer.len() {
-                        buffer[q] += results.flow_data[q];
-                    }
+                    
+                    // Update status
+                    let mut status = node.status.write()
+                        .map_err(|e| anyhow::anyhow!("Failed to acquire status write lock: {}", e))?;
+                    *status = NodeStatus::Ready;
+                    
+                    // Clear this node's inflow storage
+                    let mut old_inflow = topology.nodes[&node_id].inflow_storage.lock()
+                        .map_err(|e| anyhow::anyhow!("Failed to lock inflow storage: {}", e))?;
+                    old_inflow.clear();
                 }
-                println!("done with node {}", node_id);
-                let mut status = node.status.write().unwrap();
-                *status = NodeStatus::Ready;
-                // clear this nodes inflow storage
-                let mut old_inflow = topology.nodes[&node_id].inflow_storage.lock().unwrap();
-                old_inflow.clear();
+                Err(e) => {
+                    eprintln!("Error processing node {}: {}", node_id, e);
+                }
             }
+            
             // Mark as completed
             completed_count.fetch_add(1, Ordering::Relaxed);
+            progress_bar.inc(1);
         }
     }
+    Ok(())
 }
 
 // Compute depths from leaves
@@ -210,7 +234,8 @@ pub fn process_routing_parallel(
     max_timesteps: usize,
     dt: f32,
     output_file: Arc<Mutex<FileMut>>,
-) -> Result<(), Box<dyn Error>> {
+    progress_bar: Arc<ProgressBar>,
+) -> Result<()> {
     // Compute node depths and create work queue
     let depths = compute_depths(topology);
     let max_depth = *depths.values().max().unwrap_or(&0);
@@ -239,6 +264,8 @@ pub fn process_routing_parallel(
 
     // Spawn worker threads
     let num_threads = num_cpus::get();
+    println!("Using {} threads for parallel processing", num_threads);
+    
     let mut handles = vec![];
 
     for i in 0..num_threads {
@@ -247,41 +274,33 @@ pub fn process_routing_parallel(
         let topo = Arc::clone(&topology_arc);
         let params = Arc::clone(&channel_params_arc);
         let output = Arc::clone(&output_file);
+        let pb = Arc::clone(&progress_bar);
 
         let handle = thread::spawn(move || {
-            println!("Worker {} started", i);
-            worker_thread(
-                queue,
-                completed,
-                total_nodes,
-                topo,
-                params,
-                max_timesteps,
-                dt,
-                output,
-            );
-            println!("Worker {} finished", i);
+            if let Err(e) = worker_thread(queue, completed, total_nodes, topo, params, max_timesteps, dt, output, pb) {
+                eprintln!("Worker {} encountered error: {}", i, e);
+            }
         });
         handles.push(handle);
     }
 
     // Wait for completion
-    for handle in handles {
-        handle.join().unwrap();
+    for (i, handle) in handles.into_iter().enumerate() {
+        handle.join()
+            .map_err(|e| anyhow::anyhow!("Worker thread {} panicked: {:?}", i, e))?;
     }
+
+    progress_bar.finish_with_message("Complete");
 
     // Verify all nodes were processed
     let final_count = completed_count.load(Ordering::Relaxed);
     if final_count != total_nodes {
-        eprintln!(
-            "Warning: Only {}/{} nodes were processed",
+        anyhow::bail!(
+            "Only {}/{} nodes were processed",
             final_count, total_nodes
         );
-    } else {
-        println!("Successfully processed all {} nodes", total_nodes);
     }
 
-    println!("there are {} nodes", topology.nodes.len());
-
+    println!("Successfully processed all {} nodes", total_nodes);
     Ok(())
 }
