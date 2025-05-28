@@ -10,9 +10,16 @@ use indicatif::ProgressBar;
 use netcdf::FileMut;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+// Message type for the writer thread
+enum WriterMessage {
+    WriteResults(Arc<SimulationResults>),
+    Shutdown,
+}
 
 // Process all timesteps for a single node
 fn process_node_all_timesteps(
@@ -22,20 +29,18 @@ fn process_node_all_timesteps(
     max_timesteps: usize,
     dt: f32,
 ) -> Result<SimulationResults> {
-    let node = topology.nodes.get(node_id)
+    let node = topology
+        .nodes
+        .get(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node {} not found", node_id))?;
-    
+
     let mut results = SimulationResults::new(node.id as i64);
-    
-    let area = node.area_sqkm
+
+    let area = node
+        .area_sqkm
         .ok_or_else(|| anyhow::anyhow!("Node {} has no area defined", node_id))?;
-    
-    let mut external_flows = load_external_flows(
-        node.qlat_file.clone(),
-        &node.id,
-        None,
-        area,
-    )?;
+
+    let mut external_flows = load_external_flows(node.qlat_file.clone(), &node.id, None, area)?;
 
     let s0 = if channel_params.s0 == 0.0 {
         0.00001
@@ -43,7 +48,9 @@ fn process_node_all_timesteps(
         channel_params.s0
     };
 
-    let mut inflow = node.inflow_storage.lock()
+    let mut inflow = node
+        .inflow_storage
+        .lock()
         .map_err(|e| anyhow::anyhow!("Failed to lock inflow storage: {}", e))?;
 
     let mut qup = 0.0;
@@ -74,7 +81,7 @@ fn process_node_all_timesteps(
             channel_params.ncc,
             depth_p,
         );
-        
+
         results.flow_data.push(qdc);
         results.velocity_data.push(velc);
         results.depth_data.push(depthc);
@@ -84,8 +91,36 @@ fn process_node_all_timesteps(
         qdp = qdc;
         depth_p = depthc;
     }
-    
+
     Ok(results)
+}
+
+// Writer thread function
+fn writer_thread(
+    receiver: Receiver<WriterMessage>,
+    output_file: Arc<Mutex<FileMut>>,
+) -> Result<()> {
+    loop {
+        match receiver.recv() {
+            Ok(WriterMessage::WriteResults(results)) => {
+                // Write results to netcdf
+                if let Err(e) = write_output(&output_file, &results) {
+                    eprintln!(
+                        "Error writing results for node {}: {}",
+                        results.feature_id, e
+                    );
+                }
+            }
+            Ok(WriterMessage::Shutdown) => {
+                break;
+            }
+            Err(e) => {
+                eprintln!("Writer thread channel error: {}", e);
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 // Worker function with message queue pattern
@@ -97,7 +132,7 @@ fn worker_thread(
     channel_params_map: Arc<HashMap<u32, ChannelParams>>,
     max_timesteps: usize,
     dt: f32,
-    output_file: Arc<Mutex<FileMut>>,
+    writer_tx: Sender<WriterMessage>,
     progress_bar: Arc<ProgressBar>,
 ) -> Result<()> {
     loop {
@@ -108,7 +143,8 @@ fn worker_thread(
 
         // Try to get work from the queue
         let node_id = {
-            let mut queue = work_queue.lock()
+            let mut queue = work_queue
+                .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock work queue: {}", e))?;
             queue.pop_front()
         };
@@ -147,7 +183,8 @@ fn worker_thread(
         if !upstream_ready {
             // Put back at the end of the queue
             {
-                let mut queue = work_queue.lock()
+                let mut queue = work_queue
+                    .lock()
                     .map_err(|e| anyhow::anyhow!("Failed to lock work queue: {}", e))?;
                 queue.push_back(node_id);
             }
@@ -161,32 +198,44 @@ fn worker_thread(
         if let Some(params) = channel_params_map.get(&node_id) {
             match process_node_all_timesteps(&node_id, &topology, params, max_timesteps, dt) {
                 Ok(results) => {
-                    // Write results to netcdf
-                    write_output(&output_file, &results)?;
-                    
+                    // Wrap results in Arc for sharing
+                    let results_arc = Arc::new(results);
+
+                    // Send results to writer thread
+                    if let Err(e) =
+                        writer_tx.send(WriterMessage::WriteResults(Arc::clone(&results_arc)))
+                    {
+                        eprintln!("Failed to send results to writer thread: {}", e);
+                    }
+
                     // Pass flow to downstream node if exists
                     if let Some(downstream_id) = topology.nodes[&node_id].downstream_id {
                         if let Some(downstream_node) = topology.nodes.get(&downstream_id) {
-                            let mut buffer = downstream_node.inflow_storage.lock()
-                                .map_err(|e| anyhow::anyhow!("Failed to lock downstream buffer: {}", e))?;
+                            let mut buffer =
+                                downstream_node.inflow_storage.lock().map_err(|e| {
+                                    anyhow::anyhow!("Failed to lock downstream buffer: {}", e)
+                                })?;
                             if buffer.is_empty() {
-                                buffer.resize(results.flow_data.len(), 0.0);
+                                buffer.resize(results_arc.flow_data.len(), 0.0);
                             }
-                            for (i, &flow) in results.flow_data.iter().enumerate() {
+                            for (i, &flow) in results_arc.flow_data.iter().enumerate() {
                                 if i < buffer.len() {
                                     buffer[i] += flow;
                                 }
                             }
                         }
                     }
-                    
+
                     // Update status
-                    let mut status = node.status.write()
-                        .map_err(|e| anyhow::anyhow!("Failed to acquire status write lock: {}", e))?;
+                    let mut status = node.status.write().map_err(|e| {
+                        anyhow::anyhow!("Failed to acquire status write lock: {}", e)
+                    })?;
                     *status = NodeStatus::Ready;
-                    
+
                     // Clear this node's inflow storage
-                    let mut old_inflow = topology.nodes[&node_id].inflow_storage.lock()
+                    let mut old_inflow = topology.nodes[&node_id]
+                        .inflow_storage
+                        .lock()
                         .map_err(|e| anyhow::anyhow!("Failed to lock inflow storage: {}", e))?;
                     old_inflow.clear();
                 }
@@ -194,7 +243,7 @@ fn worker_thread(
                     eprintln!("Error processing node {}: {}", node_id, e);
                 }
             }
-            
+
             // Mark as completed
             completed_count.fetch_add(1, Ordering::Relaxed);
             progress_bar.inc(1);
@@ -256,6 +305,17 @@ pub fn process_routing_parallel(
         total_nodes, max_depth
     );
 
+    // Create channel for writer thread
+    let (writer_tx, writer_rx) = mpsc::channel();
+
+    // Spawn writer thread
+    let output_file_clone = Arc::clone(&output_file);
+    let writer_handle = thread::spawn(move || {
+        if let Err(e) = writer_thread(writer_rx, output_file_clone) {
+            eprintln!("Writer thread error: {}", e);
+        }
+    });
+
     // Shared state
     let work_queue = Arc::new(Mutex::new(work_items));
     let completed_count = Arc::new(AtomicUsize::new(0));
@@ -265,7 +325,7 @@ pub fn process_routing_parallel(
     // Spawn worker threads
     let num_threads = num_cpus::get();
     println!("Using {} threads for parallel processing", num_threads);
-    
+
     let mut handles = vec![];
 
     for i in 0..num_threads {
@@ -273,32 +333,51 @@ pub fn process_routing_parallel(
         let completed = Arc::clone(&completed_count);
         let topo = Arc::clone(&topology_arc);
         let params = Arc::clone(&channel_params_arc);
-        let output = Arc::clone(&output_file);
+        let tx = writer_tx.clone();
         let pb = Arc::clone(&progress_bar);
 
         let handle = thread::spawn(move || {
-            if let Err(e) = worker_thread(queue, completed, total_nodes, topo, params, max_timesteps, dt, output, pb) {
+            if let Err(e) = worker_thread(
+                queue,
+                completed,
+                total_nodes,
+                topo,
+                params,
+                max_timesteps,
+                dt,
+                tx,
+                pb,
+            ) {
                 eprintln!("Worker {} encountered error: {}", i, e);
             }
         });
         handles.push(handle);
     }
 
-    // Wait for completion
+    // Drop the original sender so the writer knows when all workers are done
+    drop(writer_tx);
+
+    // Wait for worker threads to complete
     for (i, handle) in handles.into_iter().enumerate() {
-        handle.join()
+        handle
+            .join()
             .map_err(|e| anyhow::anyhow!("Worker thread {} panicked: {:?}", i, e))?;
     }
+
+    // Send shutdown message to writer thread
+    // Note: All worker senders are dropped, so the writer will exit when channel is empty
+
+    // Wait for writer thread to complete
+    writer_handle
+        .join()
+        .map_err(|e| anyhow::anyhow!("Writer thread panicked: {:?}", e))?;
 
     progress_bar.finish_with_message("Complete");
 
     // Verify all nodes were processed
     let final_count = completed_count.load(Ordering::Relaxed);
     if final_count != total_nodes {
-        anyhow::bail!(
-            "Only {}/{} nodes were processed",
-            final_count, total_nodes
-        );
+        anyhow::bail!("Only {}/{} nodes were processed", final_count, total_nodes);
     }
 
     println!("Successfully processed all {} nodes", total_nodes);

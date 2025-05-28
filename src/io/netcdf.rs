@@ -22,7 +22,8 @@ pub fn init_netcdf_output(
 
     // Add variables
     // Time variable
-    let mut time_var = file.add_variable::<f64>("time", &["time"])
+    let mut time_var = file
+        .add_variable::<f64>("time", &["time"])
         .context("Failed to add time variable")?;
     time_var.put_attribute("_FillValue", -9999.0)?;
     time_var.put_attribute("long_name", "valid output time")?;
@@ -35,16 +36,19 @@ pub fn init_netcdf_output(
         ),
     )?;
     time_var.put_attribute("missing_value", -9999.0)?;
-    time_var.put_values(&timesteps, ..)
+    time_var
+        .put_values(&timesteps, ..)
         .context("Failed to write time values")?;
 
     // Feature ID variable
-    let mut feature_var = file.add_variable::<i64>("feature_id", &["feature_id"])
+    let mut feature_var = file
+        .add_variable::<i64>("feature_id", &["feature_id"])
         .context("Failed to add feature_id variable")?;
     feature_var.put_attribute("long_name", "Segment ID")?;
 
     // Flow variable
-    let mut flow_var = file.add_variable::<f32>("flow", &["feature_id", "time"])
+    let mut flow_var = file
+        .add_variable::<f32>("flow", &["feature_id", "time"])
         .context("Failed to add flow variable")?;
     flow_var.put_attribute("_FillValue", -9999.0f32)?;
     flow_var.put_attribute("long_name", "Flow")?;
@@ -52,7 +56,8 @@ pub fn init_netcdf_output(
     flow_var.put_attribute("missing_value", -9999.0f32)?;
 
     // Velocity variable
-    let mut velocity_var = file.add_variable::<f32>("velocity", &["feature_id", "time"])
+    let mut velocity_var = file
+        .add_variable::<f32>("velocity", &["feature_id", "time"])
         .context("Failed to add velocity variable")?;
     velocity_var.put_attribute("_FillValue", -9999.0f32)?;
     velocity_var.put_attribute("long_name", "Velocity")?;
@@ -60,7 +65,8 @@ pub fn init_netcdf_output(
     velocity_var.put_attribute("missing_value", -9999.0f32)?;
 
     // Depth variable
-    let mut depth_var = file.add_variable::<f32>("depth", &["feature_id", "time"])
+    let mut depth_var = file
+        .add_variable::<f32>("depth", &["feature_id", "time"])
         .context("Failed to add depth variable")?;
     depth_var.put_attribute("_FillValue", -9999.0f32)?;
     depth_var.put_attribute("long_name", "Depth")?;
@@ -85,35 +91,44 @@ pub fn init_netcdf_output(
 // Function to write results to NetCDF
 pub fn write_output(
     output_file: &Arc<Mutex<FileMut>>,
-    results: &SimulationResults,
+    results: &Arc<SimulationResults>,
 ) -> Result<()> {
     // Get lock on file
-    let mut file = output_file.lock()
+    let mut file = output_file
+        .lock()
         .map_err(|e| anyhow::anyhow!("Failed to acquire NetCDF file lock: {}", e))?;
 
     // Get feature variable
-    let mut feature_var = file.variable_mut("feature_id")
+    let mut feature_var = file
+        .variable_mut("feature_id")
         .ok_or_else(|| anyhow::anyhow!("feature_id variable not found"))?;
     let fidx = feature_var.len();
-    feature_var.put_value(results.feature_id, fidx)
+    feature_var
+        .put_value(results.feature_id, fidx)
         .context("Failed to write feature_id")?;
 
     // Flow variable
-    let mut flow_var = file.variable_mut("flow")
+    let mut flow_var = file
+        .variable_mut("flow")
         .ok_or_else(|| anyhow::anyhow!("flow variable not found"))?;
-    flow_var.put_values(&results.flow_data, (fidx, ..))
+    flow_var
+        .put_values(&results.flow_data, (fidx, ..))
         .context("Failed to write flow data")?;
 
     // Velocity variable
-    let mut velocity_var = file.variable_mut("velocity")
+    let mut velocity_var = file
+        .variable_mut("velocity")
         .ok_or_else(|| anyhow::anyhow!("velocity variable not found"))?;
-    velocity_var.put_values(&results.velocity_data, (fidx, ..))
+    velocity_var
+        .put_values(&results.velocity_data, (fidx, ..))
         .context("Failed to write velocity data")?;
 
     // Depth variable
-    let mut depth_var = file.variable_mut("depth")
+    let mut depth_var = file
+        .variable_mut("depth")
         .ok_or_else(|| anyhow::anyhow!("depth variable not found"))?;
-    depth_var.put_values(&results.depth_data, (fidx, ..))
+    depth_var
+        .put_values(&results.depth_data, (fidx, ..))
         .context("Failed to write depth data")?;
 
     Ok(())
