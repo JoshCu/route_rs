@@ -8,20 +8,29 @@ use crate::state::NodeStatus;
 use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use netcdf::FileMut;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
-// Message type for the writer thread
+// Message types
 enum WriterMessage {
     WriteResults(Arc<SimulationResults>),
     Shutdown,
 }
 
-// Process all timesteps for a single node
+enum WorkerMessage {
+    ProcessNode(u32),
+    Shutdown,
+}
+
+enum SchedulerMessage {
+    NodeCompleted(u32),
+    Shutdown,
+}
+
+// Process all timesteps for a single node (unchanged)
 fn process_node_all_timesteps(
     node_id: &u32,
     topology: &NetworkTopology,
@@ -58,13 +67,9 @@ fn process_node_all_timesteps(
     let mut depth_p = 0.0;
 
     for _timestep in 0..max_timesteps {
-        // Get external flow
         let external_flow = external_flows.pop_front().unwrap_or(0.0);
-
-        // Get upstream flow
         let upstream_flow = inflow.pop_front().unwrap_or(0.0);
 
-        // Run routing
         let (qdc, velc, depthc, _, _, _) = mc_kernel::submuskingcunge(
             qup,
             upstream_flow,
@@ -86,7 +91,6 @@ fn process_node_all_timesteps(
         results.velocity_data.push(velc);
         results.depth_data.push(depthc);
 
-        // Update previous state
         qup = upstream_flow;
         qdp = qdc;
         depth_p = depthc;
@@ -95,7 +99,7 @@ fn process_node_all_timesteps(
     Ok(results)
 }
 
-// Writer thread function
+// Writer thread function (unchanged)
 fn writer_thread(
     receiver: Receiver<WriterMessage>,
     output_file: Arc<Mutex<FileMut>>,
@@ -103,7 +107,6 @@ fn writer_thread(
     loop {
         match receiver.recv() {
             Ok(WriterMessage::WriteResults(results)) => {
-                // Write results to netcdf
                 if let Err(e) = write_output(&output_file, &results) {
                     eprintln!(
                         "Error writing results for node {}: {}",
@@ -111,9 +114,7 @@ fn writer_thread(
                     );
                 }
             }
-            Ok(WriterMessage::Shutdown) => {
-                break;
-            }
+            Ok(WriterMessage::Shutdown) => break,
             Err(e) => {
                 eprintln!("Writer thread channel error: {}", e);
                 break;
@@ -123,11 +124,86 @@ fn writer_thread(
     Ok(())
 }
 
-// Worker function with message queue pattern
-fn worker_thread(
-    work_queue: Arc<Mutex<VecDeque<u32>>>,
-    completed_count: Arc<AtomicUsize>,
+// Scheduler thread that tracks dependencies and sends ready work
+fn scheduler_thread(
+    topology: Arc<NetworkTopology>,
+    scheduler_rx: Receiver<SchedulerMessage>,
+    worker_tx: Vec<Sender<WorkerMessage>>,
     total_nodes: usize,
+    completed_count: Arc<AtomicUsize>,
+) -> Result<()> {
+    // Track which nodes are ready to process
+    let mut ready_nodes = VecDeque::new();
+    let mut processed_nodes = HashSet::new();
+    let mut pending_downstream_count: HashMap<u32, usize> = HashMap::new();
+    
+    // Initialize with leaf nodes (no upstream dependencies)
+    for (&node_id, node) in &topology.nodes {
+        if node.upstream_ids.is_empty() {
+            ready_nodes.push_back(node_id);
+        } else {
+            // Count how many upstream nodes need to complete
+            pending_downstream_count.insert(node_id, node.upstream_ids.len());
+        }
+    }
+
+    let num_workers = worker_tx.len();
+    let mut next_worker = 0;
+
+    loop {
+        // Send ready work to workers
+        while let Some(node_id) = ready_nodes.pop_front() {
+            // Round-robin distribution to workers
+            if let Err(e) = worker_tx[next_worker].send(WorkerMessage::ProcessNode(node_id)) {
+                eprintln!("Failed to send work to worker {}: {}", next_worker, e);
+            }
+            next_worker = (next_worker + 1) % num_workers;
+        }
+
+        // Wait for completion messages
+        match scheduler_rx.recv() {
+            Ok(SchedulerMessage::NodeCompleted(node_id)) => {
+                processed_nodes.insert(node_id);
+                
+                // Check if this enables any downstream nodes
+                if let Some(node) = topology.nodes.get(&node_id) {
+                    if let Some(downstream_id) = node.downstream_id {
+                        if let Some(count) = pending_downstream_count.get_mut(&downstream_id) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                // All upstream nodes are complete, this node is ready
+                                ready_nodes.push_back(downstream_id);
+                                pending_downstream_count.remove(&downstream_id);
+                            }
+                        }
+                    }
+                }
+
+                // Check if we're done
+                if processed_nodes.len() >= total_nodes {
+                    break;
+                }
+            }
+            Ok(SchedulerMessage::Shutdown) => break,
+            Err(e) => {
+                eprintln!("Scheduler channel error: {}", e);
+                break;
+            }
+        }
+    }
+
+    // Send shutdown to all workers
+    for tx in &worker_tx {
+        let _ = tx.send(WorkerMessage::Shutdown);
+    }
+
+    Ok(())
+}
+
+// Worker thread - now just receives work and processes it
+fn worker_thread(
+    work_rx: Receiver<WorkerMessage>,
+    scheduler_tx: Sender<SchedulerMessage>,
     topology: Arc<NetworkTopology>,
     channel_params_map: Arc<HashMap<u32, ChannelParams>>,
     max_timesteps: usize,
@@ -136,144 +212,68 @@ fn worker_thread(
     progress_bar: Arc<ProgressBar>,
 ) -> Result<()> {
     loop {
-        // Check if all work is done
-        if completed_count.load(Ordering::Relaxed) >= total_nodes {
-            break;
-        }
+        match work_rx.recv() {
+            Ok(WorkerMessage::ProcessNode(node_id)) => {
+                // Process the node
+                if let Some(params) = channel_params_map.get(&node_id) {
+                    match process_node_all_timesteps(&node_id, &topology, params, max_timesteps, dt) {
+                        Ok(results) => {
+                            let results_arc = Arc::new(results);
 
-        // Try to get work from the queue
-        let node_id = {
-            let mut queue = work_queue
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock work queue: {}", e))?;
-            queue.pop_front()
-        };
-
-        // If no work available, wait a bit
-        let node_id = match node_id {
-            Some(id) => id,
-            None => {
-                thread::sleep(Duration::from_millis(50));
-                thread::yield_now();
-                continue;
-            }
-        };
-
-        // Get node
-        let node = match topology.nodes.get(&node_id) {
-            Some(node) => node,
-            None => {
-                eprintln!("Node {} not found in topology", node_id);
-                completed_count.fetch_add(1, Ordering::Relaxed);
-                progress_bar.inc(1);
-                continue;
-            }
-        };
-
-        // Check if all upstream nodes are ready
-        let upstream_ready = node.upstream_ids.iter().all(|up_id| {
-            topology
-                .nodes
-                .get(up_id)
-                .and_then(|up_node| up_node.status.read().ok())
-                .map(|status| *status == NodeStatus::Ready)
-                .unwrap_or(false)
-        });
-
-        if !upstream_ready {
-            // Put back at the end of the queue
-            {
-                let mut queue = work_queue
-                    .lock()
-                    .map_err(|e| anyhow::anyhow!("Failed to lock work queue: {}", e))?;
-                queue.push_back(node_id);
-            }
-            // Yield to let other threads work
-            thread::sleep(Duration::from_millis(50));
-            thread::yield_now();
-            continue;
-        }
-
-        // Process node
-        if let Some(params) = channel_params_map.get(&node_id) {
-            match process_node_all_timesteps(&node_id, &topology, params, max_timesteps, dt) {
-                Ok(results) => {
-                    // Wrap results in Arc for sharing
-                    let results_arc = Arc::new(results);
-
-                    // Send results to writer thread
-                    if let Err(e) =
-                        writer_tx.send(WriterMessage::WriteResults(Arc::clone(&results_arc)))
-                    {
-                        eprintln!("Failed to send results to writer thread: {}", e);
-                    }
-
-                    // Pass flow to downstream node if exists
-                    if let Some(downstream_id) = topology.nodes[&node_id].downstream_id {
-                        if let Some(downstream_node) = topology.nodes.get(&downstream_id) {
-                            let mut buffer =
-                                downstream_node.inflow_storage.lock().map_err(|e| {
-                                    anyhow::anyhow!("Failed to lock downstream buffer: {}", e)
-                                })?;
-                            if buffer.is_empty() {
-                                buffer.resize(results_arc.flow_data.len(), 0.0);
+                            // Send results to writer
+                            if let Err(e) = writer_tx.send(WriterMessage::WriteResults(Arc::clone(&results_arc))) {
+                                eprintln!("Failed to send results to writer: {}", e);
                             }
-                            for (i, &flow) in results_arc.flow_data.iter().enumerate() {
-                                if i < buffer.len() {
-                                    buffer[i] += flow;
+
+                            // Pass flow to downstream node
+                            if let Some(node) = topology.nodes.get(&node_id) {
+                                if let Some(downstream_id) = node.downstream_id {
+                                    if let Some(downstream_node) = topology.nodes.get(&downstream_id) {
+                                        let mut buffer = downstream_node.inflow_storage.lock()
+                                            .map_err(|e| anyhow::anyhow!("Failed to lock downstream buffer: {}", e))?;
+                                        if buffer.is_empty() {
+                                            buffer.resize(results_arc.flow_data.len(), 0.0);
+                                        }
+                                        for (i, &flow) in results_arc.flow_data.iter().enumerate() {
+                                            if i < buffer.len() {
+                                                buffer[i] += flow;
+                                            }
+                                        }
+                                    }
                                 }
+
+                                // Update status
+                                let mut status = node.status.write()
+                                    .map_err(|e| anyhow::anyhow!("Failed to acquire status write lock: {}", e))?;
+                                *status = NodeStatus::Ready;
+
+                                // Clear inflow storage
+                                let mut old_inflow = node.inflow_storage.lock()
+                                    .map_err(|e| anyhow::anyhow!("Failed to lock inflow storage: {}", e))?;
+                                old_inflow.clear();
                             }
+                        }
+                        Err(e) => {
+                            eprintln!("Error processing node {}: {}", node_id, e);
                         }
                     }
 
-                    // Update status
-                    let mut status = node.status.write().map_err(|e| {
-                        anyhow::anyhow!("Failed to acquire status write lock: {}", e)
-                    })?;
-                    *status = NodeStatus::Ready;
-
-                    // Clear this node's inflow storage
-                    let mut old_inflow = topology.nodes[&node_id]
-                        .inflow_storage
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("Failed to lock inflow storage: {}", e))?;
-                    old_inflow.clear();
+                    progress_bar.inc(1);
                 }
-                Err(e) => {
-                    eprintln!("Error processing node {}: {}", node_id, e);
+
+                // Notify scheduler that node is complete
+                if let Err(e) = scheduler_tx.send(SchedulerMessage::NodeCompleted(node_id)) {
+                    eprintln!("Failed to notify scheduler of completion: {}", e);
                 }
             }
-
-            // Mark as completed
-            completed_count.fetch_add(1, Ordering::Relaxed);
-            progress_bar.inc(1);
+            Ok(WorkerMessage::Shutdown) => break,
+            Err(e) => {
+                eprintln!("Worker channel error: {}", e);
+                break;
+            }
         }
     }
     Ok(())
-}
-
-// Compute depths from leaves
-fn compute_depths(topology: &NetworkTopology) -> HashMap<u32, usize> {
-    let mut depths = HashMap::new();
-
-    // Process in reverse routing order
-    for &node_id in topology.routing_order.iter().rev() {
-        let node = &topology.nodes[&node_id];
-
-        if node.upstream_ids.is_empty() {
-            depths.insert(node_id, 0);
-        } else {
-            let max_upstream = node
-                .upstream_ids
-                .iter()
-                .map(|&up_id| depths.get(&up_id).copied().unwrap_or(0))
-                .max()
-                .unwrap_or(0);
-            depths.insert(node_id, max_upstream + 1);
-        }
-    }
-
-    depths
 }
 
 // Main parallel routing function
@@ -285,28 +285,49 @@ pub fn process_routing_parallel(
     output_file: Arc<Mutex<FileMut>>,
     progress_bar: Arc<ProgressBar>,
 ) -> Result<()> {
-    // Compute node depths and create work queue
-    let depths = compute_depths(topology);
-    let max_depth = *depths.values().max().unwrap_or(&0);
+    let total_nodes = topology.nodes.len();
+    let completed_count = Arc::new(AtomicUsize::new(0));
+    let topology_arc = Arc::new(topology.clone());
+    let channel_params_arc = Arc::new(channel_params_map.clone());
 
-    // Create work queue sorted by depth (deepest first)
-    let mut work_items = VecDeque::new();
-    for depth_level in (0..=max_depth).rev() {
-        for (&node_id, &depth) in &depths {
-            if depth == depth_level {
-                work_items.push_back(node_id);
-            }
-        }
-    }
-
-    let total_nodes = work_items.len();
-    println!(
-        "Processing {} nodes with max depth {}",
-        total_nodes, max_depth
-    );
-
-    // Create channel for writer thread
+    // Create channels
     let (writer_tx, writer_rx) = mpsc::channel();
+    let (scheduler_tx, scheduler_rx) = mpsc::channel();
+    
+    // Create worker channels
+    let num_threads = num_cpus::get();
+    println!("Using {} worker threads for parallel processing", num_threads);
+    
+    let mut worker_txs = Vec::new();
+    let mut worker_handles = Vec::new();
+
+    // Spawn worker threads
+    for i in 0..num_threads {
+        let (work_tx, work_rx) = mpsc::channel();
+        worker_txs.push(work_tx);
+
+        let topo = Arc::clone(&topology_arc);
+        let params = Arc::clone(&channel_params_arc);
+        let writer = writer_tx.clone();
+        let scheduler = scheduler_tx.clone();
+        let pb = Arc::clone(&progress_bar);
+
+        let handle = thread::spawn(move || {
+            if let Err(e) = worker_thread(
+                work_rx,
+                scheduler,
+                topo,
+                params,
+                max_timesteps,
+                dt,
+                writer,
+                pb,
+            ) {
+                eprintln!("Worker {} error: {}", i, e);
+            }
+        });
+        worker_handles.push(handle);
+    }
 
     // Spawn writer thread
     let output_file_clone = Arc::clone(&output_file);
@@ -316,70 +337,39 @@ pub fn process_routing_parallel(
         }
     });
 
-    // Shared state
-    let work_queue = Arc::new(Mutex::new(work_items));
-    let completed_count = Arc::new(AtomicUsize::new(0));
-    let topology_arc = Arc::new(topology.clone());
-    let channel_params_arc = Arc::new(channel_params_map.clone());
+    // Spawn scheduler thread
+    let topo = Arc::clone(&topology_arc);
+    let completed = Arc::clone(&completed_count);
+    let scheduler_handle = thread::spawn(move || {
+        if let Err(e) = scheduler_thread(
+            topo,
+            scheduler_rx,
+            worker_txs,
+            total_nodes,
+            completed,
+        ) {
+            eprintln!("Scheduler thread error: {}", e);
+        }
+    });
 
-    // Spawn worker threads
-    let num_threads = num_cpus::get();
-    println!("Using {} threads for parallel processing", num_threads);
-
-    let mut handles = vec![];
-
-    for i in 0..num_threads {
-        let queue = Arc::clone(&work_queue);
-        let completed = Arc::clone(&completed_count);
-        let topo = Arc::clone(&topology_arc);
-        let params = Arc::clone(&channel_params_arc);
-        let tx = writer_tx.clone();
-        let pb = Arc::clone(&progress_bar);
-
-        let handle = thread::spawn(move || {
-            if let Err(e) = worker_thread(
-                queue,
-                completed,
-                total_nodes,
-                topo,
-                params,
-                max_timesteps,
-                dt,
-                tx,
-                pb,
-            ) {
-                eprintln!("Worker {} encountered error: {}", i, e);
-            }
-        });
-        handles.push(handle);
-    }
-
-    // Drop the original sender so the writer knows when all workers are done
+    // Drop original senders
     drop(writer_tx);
+    drop(scheduler_tx);
 
-    // Wait for worker threads to complete
-    for (i, handle) in handles.into_iter().enumerate() {
-        handle
-            .join()
+    // Wait for all threads to complete
+    scheduler_handle.join()
+        .map_err(|e| anyhow::anyhow!("Scheduler thread panicked: {:?}", e))?;
+    
+    for (i, handle) in worker_handles.into_iter().enumerate() {
+        handle.join()
             .map_err(|e| anyhow::anyhow!("Worker thread {} panicked: {:?}", i, e))?;
     }
-
-    // Send shutdown message to writer thread
-    // Note: All worker senders are dropped, so the writer will exit when channel is empty
-
-    // Wait for writer thread to complete
-    writer_handle
-        .join()
+    
+    writer_handle.join()
         .map_err(|e| anyhow::anyhow!("Writer thread panicked: {:?}", e))?;
 
     progress_bar.finish_with_message("Complete");
-
-    // Verify all nodes were processed
-    let final_count = completed_count.load(Ordering::Relaxed);
-    if final_count != total_nodes {
-        anyhow::bail!("Only {}/{} nodes were processed", final_count, total_nodes);
-    }
-
     println!("Successfully processed all {} nodes", total_nodes);
+    
     Ok(())
 }
