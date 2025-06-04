@@ -66,9 +66,16 @@ fn process_node_all_timesteps(
     let mut qdp = 0.0;
     let mut depth_p = 0.0;
 
+    let upsampling = max_timesteps / external_flows.len();
+
+    let mut external_flow = 0.0;
+    let mut upstream_flow = 0.0;
+
     for _timestep in 0..max_timesteps {
-        let external_flow = external_flows.pop_front().unwrap_or(0.0);
-        let upstream_flow = inflow.pop_front().unwrap_or(0.0);
+        if _timestep % upsampling == 0 {
+            external_flow = external_flows.pop_front().unwrap();
+        }
+        upstream_flow = inflow.pop_front().unwrap_or(0.0);
 
         let (qdc, velc, depthc, _, _, _) = mc_kernel::submuskingcunge(
             qup,
@@ -136,7 +143,7 @@ fn scheduler_thread(
     let mut ready_nodes = VecDeque::new();
     let mut processed_nodes = HashSet::new();
     let mut pending_downstream_count: HashMap<u32, usize> = HashMap::new();
-    
+
     // Initialize with leaf nodes (no upstream dependencies)
     for (&node_id, node) in &topology.nodes {
         if node.upstream_ids.is_empty() {
@@ -164,7 +171,7 @@ fn scheduler_thread(
         match scheduler_rx.recv() {
             Ok(SchedulerMessage::NodeCompleted(node_id)) => {
                 processed_nodes.insert(node_id);
-                
+
                 // Check if this enables any downstream nodes
                 if let Some(node) = topology.nodes.get(&node_id) {
                     if let Some(downstream_id) = node.downstream_id {
@@ -216,21 +223,31 @@ fn worker_thread(
             Ok(WorkerMessage::ProcessNode(node_id)) => {
                 // Process the node
                 if let Some(params) = channel_params_map.get(&node_id) {
-                    match process_node_all_timesteps(&node_id, &topology, params, max_timesteps, dt) {
+                    match process_node_all_timesteps(&node_id, &topology, params, max_timesteps, dt)
+                    {
                         Ok(results) => {
                             let results_arc = Arc::new(results);
 
                             // Send results to writer
-                            if let Err(e) = writer_tx.send(WriterMessage::WriteResults(Arc::clone(&results_arc))) {
+                            if let Err(e) = writer_tx
+                                .send(WriterMessage::WriteResults(Arc::clone(&results_arc)))
+                            {
                                 eprintln!("Failed to send results to writer: {}", e);
                             }
 
                             // Pass flow to downstream node
                             if let Some(node) = topology.nodes.get(&node_id) {
                                 if let Some(downstream_id) = node.downstream_id {
-                                    if let Some(downstream_node) = topology.nodes.get(&downstream_id) {
-                                        let mut buffer = downstream_node.inflow_storage.lock()
-                                            .map_err(|e| anyhow::anyhow!("Failed to lock downstream buffer: {}", e))?;
+                                    if let Some(downstream_node) =
+                                        topology.nodes.get(&downstream_id)
+                                    {
+                                        let mut buffer =
+                                            downstream_node.inflow_storage.lock().map_err(|e| {
+                                                anyhow::anyhow!(
+                                                    "Failed to lock downstream buffer: {}",
+                                                    e
+                                                )
+                                            })?;
                                         if buffer.is_empty() {
                                             buffer.resize(results_arc.flow_data.len(), 0.0);
                                         }
@@ -243,13 +260,15 @@ fn worker_thread(
                                 }
 
                                 // Update status
-                                let mut status = node.status.write()
-                                    .map_err(|e| anyhow::anyhow!("Failed to acquire status write lock: {}", e))?;
+                                let mut status = node.status.write().map_err(|e| {
+                                    anyhow::anyhow!("Failed to acquire status write lock: {}", e)
+                                })?;
                                 *status = NodeStatus::Ready;
 
                                 // Clear inflow storage
-                                let mut old_inflow = node.inflow_storage.lock()
-                                    .map_err(|e| anyhow::anyhow!("Failed to lock inflow storage: {}", e))?;
+                                let mut old_inflow = node.inflow_storage.lock().map_err(|e| {
+                                    anyhow::anyhow!("Failed to lock inflow storage: {}", e)
+                                })?;
                                 old_inflow.clear();
                             }
                         }
@@ -293,11 +312,14 @@ pub fn process_routing_parallel(
     // Create channels
     let (writer_tx, writer_rx) = mpsc::channel();
     let (scheduler_tx, scheduler_rx) = mpsc::channel();
-    
+
     // Create worker channels
     let num_threads = num_cpus::get();
-    println!("Using {} worker threads for parallel processing", num_threads);
-    
+    println!(
+        "Using {} worker threads for parallel processing",
+        num_threads
+    );
+
     let mut worker_txs = Vec::new();
     let mut worker_handles = Vec::new();
 
@@ -341,13 +363,7 @@ pub fn process_routing_parallel(
     let topo = Arc::clone(&topology_arc);
     let completed = Arc::clone(&completed_count);
     let scheduler_handle = thread::spawn(move || {
-        if let Err(e) = scheduler_thread(
-            topo,
-            scheduler_rx,
-            worker_txs,
-            total_nodes,
-            completed,
-        ) {
+        if let Err(e) = scheduler_thread(topo, scheduler_rx, worker_txs, total_nodes, completed) {
             eprintln!("Scheduler thread error: {}", e);
         }
     });
@@ -357,19 +373,22 @@ pub fn process_routing_parallel(
     drop(scheduler_tx);
 
     // Wait for all threads to complete
-    scheduler_handle.join()
+    scheduler_handle
+        .join()
         .map_err(|e| anyhow::anyhow!("Scheduler thread panicked: {:?}", e))?;
-    
+
     for (i, handle) in worker_handles.into_iter().enumerate() {
-        handle.join()
+        handle
+            .join()
             .map_err(|e| anyhow::anyhow!("Worker thread {} panicked: {:?}", i, e))?;
     }
-    
-    writer_handle.join()
+
+    writer_handle
+        .join()
         .map_err(|e| anyhow::anyhow!("Writer thread panicked: {:?}", e))?;
 
     progress_bar.finish_with_message("Complete");
     println!("Successfully processed all {} nodes", total_nodes);
-    
+
     Ok(())
 }

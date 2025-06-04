@@ -47,12 +47,13 @@ fn main() -> Result<()> {
 
     // Get simulation parameters
     let (max_external_steps, reference_time) = get_simulation_params(&csv_dir, &features)?;
-    
+
     let start_time = reference_time;
     let end_time = start_time + Duration::seconds((3600 * max_external_steps) as i64);
-    
+
     let external_timestep_seconds = 3600;
-    let total_timesteps = (max_external_steps + 1) * (external_timestep_seconds / internal_timestep_seconds);
+    let total_timesteps =
+        (max_external_steps + 1) * (external_timestep_seconds / internal_timestep_seconds);
 
     println!("\nSimulation Configuration:");
     println!("  Period: {} to {}", start_time, end_time);
@@ -64,7 +65,7 @@ fn main() -> Result<()> {
     let timesteps: Vec<f64> = (0..=max_external_steps)
         .map(|step| (step * 3600) as f64)
         .collect();
-    
+
     let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
     let netcdf_writer = init_netcdf_output(
         &nc_filename,
@@ -80,7 +81,7 @@ fn main() -> Result<()> {
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} nodes ({eta})")?
             .progress_chars("#>-")
     );
-    
+
     // Run parallel routing
     println!("\nStarting parallel wave-front routing...");
     process_routing_parallel(
@@ -94,27 +95,33 @@ fn main() -> Result<()> {
 
     // Final flush for CSV
     if let Some(mut wtr) = csv_writer {
-        wtr.flush()
-            .context("Failed to flush CSV writer")?;
+        wtr.flush().context("Failed to flush CSV writer")?;
         println!("CSV results saved to network_routing_results.csv");
     }
 
-    println!("\nNetwork routing complete. Output saved to {}", nc_filename);
+    println!(
+        "\nNetwork routing complete. Output saved to {}",
+        nc_filename
+    );
     Ok(())
 }
 
-fn get_simulation_params(csv_dir: &std::path::PathBuf, features: &[i64]) -> Result<(usize, NaiveDateTime)> {
-    let first_id = features.first()
+fn get_simulation_params(
+    csv_dir: &std::path::PathBuf,
+    features: &[i64],
+) -> Result<(usize, NaiveDateTime)> {
+    let first_id = features
+        .first()
         .ok_or_else(|| anyhow::anyhow!("No features found"))?;
-    
+
     let file_name = csv_dir.join(format!("cat-{}.csv", first_id));
     let content = std::fs::read_to_string(&file_name)
         .with_context(|| format!("Failed to read file: {:?}", file_name))?;
-    
-    let max_external_steps = content.lines().count().saturating_sub(1);
-    
+
+    let max_external_steps = content.lines().count().saturating_sub(2);
+
     let reference_time = NaiveDateTime::parse_from_str("2000-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")
         .context("Failed to parse reference time")?;
-    
+
     Ok((max_external_steps, reference_time))
 }
