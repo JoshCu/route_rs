@@ -49,7 +49,8 @@ fn process_node_all_timesteps(
         .area_sqkm
         .ok_or_else(|| anyhow::anyhow!("Node {} has no area defined", node_id))?;
 
-    let mut external_flows = load_external_flows(node.qlat_file.clone(), &node.id, None, area)?;
+    let mut external_flows =
+        load_external_flows(node.qlat_file.clone(), &node.id, Some(&"Q_OUT"), area)?;
 
     let s0 = if channel_params.s0 == 0.0 {
         0.00001
