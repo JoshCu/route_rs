@@ -1,113 +1,77 @@
-use crate::network::NetworkTopology;
-use csv::{ReaderBuilder, StringRecord, Writer, WriterBuilder};
-use rayon::prelude::*;
-use std::collections::HashMap;
-use std::error::Error;
+use anyhow::{Context, Result};
+use csv::{ReaderBuilder, Writer, WriterBuilder};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
-
-// Flow data from CSV
-#[derive(Debug)]
-struct FlowData {
-    index: usize,
-    timestamp: String,
-    ql: f64,
-}
-
-impl FlowData {
-    fn from_record(record: &StringRecord) -> Result<Self, Box<dyn Error>> {
-        if record.len() < 3 {
-            return Err("Record has fewer than 3 fields".into());
-        }
-
-        let index = record[0].trim().parse::<usize>()?;
-        let timestamp = record[1].trim().to_string();
-        let ql = record[2].trim().parse::<f64>()?;
-
-        Ok(FlowData {
-            index,
-            timestamp,
-            ql,
-        })
-    }
-}
+use std::path::PathBuf;
 
 // Function to load external flows for a specific nexus/catchment
 pub fn load_external_flows(
-    csv_file: &str,
-    nexus_id: &str,
-) -> Result<HashMap<usize, f64>, Box<dyn Error>> {
-    let mut external_flows = HashMap::new();
+    csv_file: PathBuf,
+    id: &u32,
+    var_name: Option<&str>,
+    area: f32,
+) -> Result<VecDeque<f32>> {
+    let mut external_flows = Vec::new();
 
     // Check if file exists, if not return empty flows
-    if !Path::new(csv_file).exists() {
-        println!("No external flow file found for {}: {}", nexus_id, csv_file);
-        return Ok(external_flows);
+    if !csv_file.exists() {
+        println!(
+            "No external flow file found for {}: {}",
+            id,
+            csv_file.display()
+        );
+        return Ok(VecDeque::from(external_flows));
     }
 
-    let file = File::open(csv_file)?;
+    let file = File::open(&csv_file)
+        .with_context(|| format!("Failed to open CSV file: {}", csv_file.display()))?;
     let buffered_reader = BufReader::new(file);
 
     let mut rdr = ReaderBuilder::new()
-        .has_headers(false)
+        .has_headers(true)
         .delimiter(b',')
         .flexible(true)
         .trim(csv::Trim::All)
         .from_reader(buffered_reader);
 
-    for result in rdr.records() {
-        let record = result?;
-        let flow_data = FlowData::from_record(&record)?;
-        external_flows.insert(flow_data.index, flow_data.ql);
+    let qlat_index = match var_name {
+        Some(var_name) => {
+            let headers = rdr.headers()
+                .context("Failed to read CSV headers")?;
+            headers.iter().position(|h| h == var_name).unwrap_or(2)
+        }
+        None => 2,
+    };
+
+    for (i, result) in rdr.records().enumerate() {
+        let record = result
+            .with_context(|| format!("Failed to read record {} in file {}", i, csv_file.display()))?;
+        
+        let ql_str = record.get(qlat_index)
+            .ok_or_else(|| anyhow::anyhow!("Missing column {} in record {}", qlat_index, i))?;
+        
+        let ql = ql_str.trim().parse::<f32>()
+            .with_context(|| format!("Failed to parse flow value '{}' in record {}", ql_str, i))?;
+
+        // https://github.com/CIROH-UA/ngen/blob/ed2a903730467fa631716c033b757c3dff5fa2bb/include/core/Layer.hpp#L142
+        let adjusted_flow = (ql * (area * 1_000_000.0)) / 3600.0;
+        external_flows.push(adjusted_flow);
     }
-
-    println!(
-        "Loaded {} external flow records for {}",
-        external_flows.len(),
-        nexus_id
-    );
-    Ok(external_flows)
-}
-
-// Parallel loading of external flows
-pub fn load_external_flows_parallel(
-    topology: &NetworkTopology,
-    csv_dir: &str,
-) -> HashMap<String, HashMap<usize, f64>> {
-    let nexus_ids: Vec<_> = topology.routing_order.clone();
-
-    let flows: Vec<_> = nexus_ids
-        .par_iter()
-        .map(|nexus_id| {
-            let csv_file = format!("{}{}_output.csv", csv_dir, nexus_id);
-            let flows = match load_external_flows(&csv_file, nexus_id) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Failed to load external flows for {}: {}", nexus_id, e);
-                    HashMap::new()
-                }
-            };
-            (nexus_id.clone(), flows)
-        })
-        .collect();
-
-    flows.into_iter().collect()
+    
+    Ok(VecDeque::from(external_flows))
 }
 
 // Create CSV writer with headers
-pub fn create_csv_writer(path: &str) -> Result<Writer<File>, Box<dyn Error>> {
-    let mut wtr = WriterBuilder::new().has_headers(true).from_path(path)?;
+pub fn create_csv_writer(path: &str) -> Result<Writer<File>> {
+    let mut wtr = WriterBuilder::new()
+        .has_headers(true)
+        .from_path(path)
+        .with_context(|| format!("Failed to create CSV writer at {}", path))?;
 
     // Write header
-    wtr.write_record(&[
-        "step",
-        "nexus_id",
-        "channel_id",
-        "flow",
-        "velocity",
-        "depth",
-    ])?;
+    wtr.write_record(&["step", "feature_id", "flow", "velocity", "depth"])
+        .context("Failed to write CSV header")?;
 
     Ok(wtr)
 }

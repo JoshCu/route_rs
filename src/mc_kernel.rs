@@ -1,71 +1,78 @@
-/// Muskingcunge routing implementation for channel flow calculations
-/// Ported from Fortran to Rust
+/// Muskingum-Cunge routing implementation for channel flow calculations
+/// Updated to match Fortran version from NWM - now using f32 for performance
 pub fn submuskingcunge(
-    qup: f64,     // flow upstream previous timestep
-    quc: f64,     // flow upstream current timestep
-    qdp: f64,     // flow downstream previous timestep
-    ql: f64,      // lateral inflow through reach (m^3/sec)
-    dt: f64,      // routing period in seconds
-    so: f64,      // channel bottom slope %
-    dx: f64,      // channel length (m)
-    n: f64,       // mannings coefficient
-    cs: f64,      // channel side slope
-    bw: f64,      // bottom width (meters)
-    tw: f64,      // top width before bankfull (meters)
-    tw_cc: f64,   // top width of compound (meters)
-    n_cc: f64,    // mannings of compound
-    depth_p: f64, // depth of flow in channel
-) -> (f64, f64, f64) {
-    // Returns (qdc, velc, depthc)
+    qup: f32,     // flow upstream previous timestep
+    quc: f32,     // flow upstream current timestep
+    qdp: f32,     // flow downstream previous timestep
+    ql: f32,      // lateral inflow through reach (m^3/sec)
+    dt: f32,      // routing period in seconds
+    so: f32,      // channel bottom slope (as fraction, not %)
+    dx: f32,      // channel length (m)
+    n: f32,       // mannings coefficient
+    cs: f32,      // channel side slope
+    bw: f32,      // bottom width (meters)
+    tw: f32,      // top width before bankfull (meters)
+    tw_cc: f32,   // top width of compound (meters)
+    n_cc: f32,    // mannings of compound
+    depth_p: f32, // depth of flow in channel
+) -> (f32, f32, f32, f32, f32, f32) {
+    // Returns (qdc, velc, depthc, ck, cn, x)
+    //
+    #[inline(always)]
+    fn pow_2_3(x: f32) -> f32 {
+        x.powf(2.0 / 3.0)
+        // x.sqrt().sqrt().sqrt().powi(5)
+    }
+
+    // Helper function to compute x^(5/3) efficiently
+    #[inline(always)]
+    fn pow_5_3(x: f32) -> f32 {
+        x * pow_2_3(x)
+    }
+
     // Local variables
-    let mut c1: f64 = 0.0;
-    let mut c2: f64 = 0.0;
-    let mut c3: f64 = 0.0;
-    let mut c4: f64 = 0.0;
-    let mut km: f64 = 0.0; // K travel time in hrs in reach
-    let mut x: f64 = 0.0; // weighting factors 0<=X<=0.5
-    let mut ck: f64 = 0.0; // wave celerity (m/s)
+    let mut c1: f32 = 0.0;
+    let mut c2: f32 = 0.0;
+    let mut c3: f32 = 0.0;
+    let mut c4: f32 = 0.0;
+    let mut km: f32;
+    let mut x: f32 = 0.0;
+    let mut ck: f32 = 0.0;
+    let mut cn: f32 = 0.0;
 
-    // Channel geometry and characteristics, local variables
-    let mut twl: f64 = 0.0; // top width at simulated flow (m)
-    let mut area: f64 = 0.0; // Cross sectional area channel
-    let mut area_c: f64 = 0.0; // Cross sectional area compound
-    let z: f64; // trapezoid distance (m)
-    let mut r: f64 = 0.0; // Hydraulic radius
-    let mut wp: f64 = 0.0; // wetted perimeter
-    let mut wp_c: f64 = 0.0; // wetted perimeter of compound
-    let mut h: f64; // depth of flow in channel
-    let mut h_0: f64; // secant method estimate
-    let mut h_1: f64; // secant method estimate
-    let bfd: f64; // bankfull depth (m)
-    let mut qj_0: f64 = 0.0; // secant method estimate
-    let mut qj: f64 = 0.0; // intermediate flow estimate
-    let mut d: f64; // diffusion coeff
-    let mut aerror: f64; // absolute error
-    let mut rerror: f64 = 1.0; // relative error
-    let mut iter: i32; // iteration counter
-    let mut maxiter: i32 = 100; // maximum number of iterations
-    let mindepth: f64 = 0.01; // minimum depth in channel
-    let mut tries: i32 = 0; // channel segment counter
-
-    aerror = 0.01;
+    // Channel geometry and characteristics
+    let mut twl: f32;
+    let mut area: f32;
+    let mut area_c: f32;
+    let z: f32;
+    let mut r: f32;
+    let mut wp: f32;
+    let mut wp_c: f32;
+    let mut h: f32;
+    let mut h_0: f32;
+    let mut h_1: f32;
+    let bfd: f32;
+    let mut qj_0: f32 = 0.0;
+    let mut qj: f32 = 0.0;
+    let mut d: f32;
+    let mut aerror: f32 = 0.01;
+    let mut rerror: f32 = 1.0;
+    let mut iter: i32;
+    let mut maxiter: i32 = 100;
+    let mindepth: f32 = 0.01;
+    let mut tries: i32 = 0;
 
     // Set trapezoid distance
-    if cs == 0.0 {
-        z = 1.0;
-    } else {
-        z = 1.0 / cs; // channel side distance (m)
-    }
+    z = if cs == 0.0 { 1.0 } else { 1.0 / cs };
 
     // Calculate bankfull depth
-    if bw > tw {
-        // Effectively infinite deep bankful
-        bfd = bw / 0.00001;
+    bfd = if bw > tw {
+        bw / 0.00001
     } else if bw == tw {
-        bfd = bw / (2.0 * z); // bankfull depth is effectively
+        bw / (2.0 * z)
     } else {
-        bfd = (tw - bw) / (2.0 * z); // bankfull depth (m)
-    }
+        (tw - bw) / (2.0 * z)
+    };
 
     // Check for invalid channel coefficients
     if n <= 0.0 || so <= 0.0 || z <= 0.0 || bw <= 0.0 {
@@ -76,103 +83,90 @@ pub fn submuskingcunge(
     }
 
     // Initialize depth
-    let mut depth_c = f64::max(depth_p, 0.0);
-    h = (depth_c * 1.33) + mindepth; // 1.50 of depth
-    h_0 = depth_c * 0.67; // 0.50 of depth
+    let mut depth_c = f32::max(depth_p, 0.0);
+    h = (depth_c * 1.33) + mindepth;
+    h_0 = depth_c * 0.67;
 
-    let qdc: f64; // flow downstream current timestep
-    let mut velc: f64 = 0.0; // channel velocity
+    let qdc: f32;
+    let velc: f32;
 
     // Only solve if there's water to flux
-    if ql > 0.0 || qup > 0.0 || qdp > 0.0 {
+    if ql > 0.0 || qup > 0.0 || quc > 0.0 || qdp > 0.0 {
         'outer: loop {
             iter = 0;
 
             // Secant method loop
             while rerror > 0.01 && aerror >= mindepth && iter <= maxiter {
-                area_c = 0.0;
+                // Lower interval (h_0)
                 wp_c = 0.0;
+                area = 0.0;
+                area_c = 0.0;
 
-                // ----- Lower interval --------------------
-                twl = bw + 2.0 * z * h_0; // Top surface water width of the channel inflow
+                // Calculate hydraulic geometry for h_0
+                twl = bw + 2.0 * z * h_0;
 
-                if h_0 > bfd {
+                if h_0 > bfd && tw_cc > 0.0 && n_cc > 0.0 {
                     // Water outside of defined channel
                     area = (bw + bfd * z) * bfd;
-                    area_c = tw_cc * (h_0 - bfd); // Assume compound component is rect. chan
-                    wp = bw + 2.0 * bfd * f64::sqrt(1.0 + z * z);
-                    wp_c = tw_cc + (2.0 * (h_0 - bfd)); // WPC is 2 times the Tw
-                    r = (area + area_c) / (wp + wp_c); // Hydraulic radius
+                    area_c = tw_cc * (h_0 - bfd);
+                    wp = bw + 2.0 * bfd * (1.0 + z * z).sqrt();
+                    wp_c = tw_cc + 2.0 * (h_0 - bfd);
+                    r = (area + area_c) / (wp + wp_c);
                 } else {
                     area = (bw + h_0 * z) * h_0;
-                    wp = bw + 2.0 * h_0 * f64::sqrt(1.0 + z * z);
-
-                    if wp > 0.0 {
-                        r = area / wp;
-                    } else {
-                        r = 0.0;
-                    }
+                    wp = bw + 2.0 * h_0 * (1.0 + z * z).sqrt();
+                    r = if wp > 0.0 { area / wp } else { 0.0 };
                 }
 
-                if h_0 > bfd {
-                    // Water outside of defined channel
-                    // Weight the celerity by the contributing area
-                    ck = f64::max(
+                // Calculate kinematic celerity
+                if h_0 > bfd && tw_cc > 0.0 && n_cc > 0.0 {
+                    ck = f32::max(
                         0.0,
-                        ((f64::sqrt(so) / n)
-                            * ((5.0 / 3.0) * r.powf(2.0 / 3.0)
-                                - ((2.0 / 3.0)
-                                    * r.powf(5.0 / 3.0)
-                                    * (2.0 * f64::sqrt(1.0 + z * z) / (bw + 2.0 * bfd * z))))
+                        ((so.sqrt() / n)
+                            * ((5.0 / 3.0) * pow_2_3(r)
+                                - (2.0 / 3.0)
+                                    * pow_5_3(r)
+                                    * (2.0 * (1.0 + z * z).sqrt() / (bw + 2.0 * bfd * z)))
                             * area
-                            + ((f64::sqrt(so) / n_cc) * (5.0 / 3.0) * (h_0 - bfd).powf(2.0 / 3.0))
+                            + (so.sqrt() / n_cc)
+                                * (5.0 / 3.0)
+                                * (h_0 - bfd).powf(2.0 / 3.0)
                                 * area_c)
                             / (area + area_c),
                     );
+                } else if h_0 > 0.0 {
+                    ck = f32::max(
+                        0.0,
+                        (so.sqrt() / n)
+                            * ((5.0 / 3.0) * pow_2_3(r)
+                                - (2.0 / 3.0)
+                                    * pow_5_3(r)
+                                    * (2.0 * (1.0 + z * z).sqrt() / (bw + 2.0 * h_0 * z))),
+                    );
                 } else {
-                    if h_0 > 0.0 {
-                        ck = f64::max(
-                            0.0,
-                            (f64::sqrt(so) / n)
-                                * ((5.0 / 3.0) * r.powf(2.0 / 3.0)
-                                    - ((2.0 / 3.0)
-                                        * r.powf(5.0 / 3.0)
-                                        * (2.0 * f64::sqrt(1.0 + z * z) / (bw + 2.0 * h_0 * z)))),
-                        );
-                    } else {
-                        ck = 0.0;
-                    }
+                    ck = 0.0;
                 }
 
-                if ck > 0.0 {
-                    km = f64::max(dt, dx / ck);
-                } else {
-                    km = dt;
-                }
+                km = if ck > 0.0 { f32::max(dt, dx / ck) } else { dt };
 
-                if h_0 > bfd {
-                    // Water outside of defined channel
-                    x = f64::min(
+                // Calculate X parameter for h_0 (interval = 1)
+                if h_0 > bfd && tw_cc > 0.0 && n_cc > 0.0 && ck > 0.0 {
+                    x = f32::min(
                         0.5,
-                        f64::max(0.0, 0.5 * (1.0 - (qj_0 / (2.0 * tw_cc * so * ck * dx)))),
+                        f32::max(0.0, 0.5 * (1.0 - (qj_0 / (2.0 * tw_cc * so * ck * dx)))),
+                    );
+                } else if ck > 0.0 {
+                    x = f32::min(
+                        0.5,
+                        f32::max(0.0, 0.5 * (1.0 - (qj_0 / (2.0 * twl * so * ck * dx)))),
                     );
                 } else {
-                    if ck > 0.0 {
-                        x = f64::min(
-                            0.5,
-                            f64::max(0.0, 0.5 * (1.0 - (qj_0 / (2.0 * twl * so * ck * dx)))),
-                        );
-                    } else {
-                        x = 0.5;
-                    }
+                    x = 0.5;
                 }
 
-                d = km * (1.0 - x) + dt / 2.0; // Seconds
+                d = km * (1.0 - x) + dt / 2.0;
                 if d == 0.0 {
-                    panic!(
-                        "FATAL ERROR: D is 0 in MUSKINGCUNGE: km={}, x={}, dt={}, d={}",
-                        km, x, dt, d
-                    );
+                    panic!("FATAL ERROR: D is 0 in MUSKINGCUNGE");
                 }
 
                 c1 = (km * x + dt / 2.0) / d;
@@ -180,102 +174,84 @@ pub fn submuskingcunge(
                 c3 = (km * (1.0 - x) - dt / 2.0) / d;
                 c4 = (ql * dt) / d;
 
-                if (wp + wp_c) > 0.0 {
-                    // Avoid divide by zero
+                if wp + wp_c > 0.0 {
                     let manning_avg = ((wp * n) + (wp_c * n_cc)) / (wp + wp_c);
-                    qj_0 = ((c1 * qup) + (c2 * quc) + (c3 * qdp) + c4)
-                        - ((1.0 / manning_avg)
-                            * (area + area_c)
-                            * r.powf(2.0 / 3.0)
-                            * f64::sqrt(so));
+                    qj_0 = (c1 * qup + c2 * quc + c3 * qdp + c4)
+                        - ((1.0 / manning_avg) * (area + area_c) * pow_2_3(r) * so.sqrt());
                 }
 
-                area_c = 0.0;
+                // Upper interval (h)
                 wp_c = 0.0;
+                area = 0.0;
+                area_c = 0.0;
 
-                // --Upper interval -----------
-                twl = bw + 2.0 * z * h; // Top width of the channel inflow
+                twl = bw + 2.0 * z * h;
 
-                if h > bfd {
-                    // Water outside of defined channel
+                if h > bfd && tw_cc > 0.0 && n_cc > 0.0 {
                     area = (bw + bfd * z) * bfd;
-                    area_c = tw_cc * (h - bfd); // Assume compound component is rect. chan
-                    wp = bw + 2.0 * bfd * f64::sqrt(1.0 + z * z);
-                    wp_c = tw_cc + (2.0 * (h - bfd)); // The additional wetted perimeter
+                    area_c = tw_cc * (h - bfd);
+                    wp = bw + 2.0 * bfd * (1.0 + z * z).sqrt();
+                    wp_c = tw_cc + 2.0 * (h - bfd);
                     r = (area + area_c) / (wp + wp_c);
                 } else {
                     area = (bw + h * z) * h;
-                    wp = bw + 2.0 * h * f64::sqrt(1.0 + z * z);
-                    if wp > 0.0 {
-                        r = area / wp;
-                    } else {
-                        r = 0.0;
-                    }
+                    wp = bw + 2.0 * h * (1.0 + z * z).sqrt();
+                    r = if wp > 0.0 { area / wp } else { 0.0 };
                 }
 
-                if h > bfd {
-                    // Water outside of defined channel, assumed rectangular
-                    ck = f64::max(
+                if h > bfd && tw_cc > 0.0 && n_cc > 0.0 {
+                    ck = f32::max(
                         0.0,
-                        ((f64::sqrt(so) / n)
-                            * ((5.0 / 3.0) * r.powf(2.0 / 3.0)
-                                - ((2.0 / 3.0)
-                                    * r.powf(5.0 / 3.0)
-                                    * (2.0 * f64::sqrt(1.0 + z * z) / (bw + 2.0 * bfd * z))))
+                        ((so.sqrt() / n)
+                            * ((5.0 / 3.0) * pow_2_3(r)
+                                - (2.0 / 3.0)
+                                    * pow_5_3(r)
+                                    * (2.0 * (1.0 + z * z).sqrt() / (bw + 2.0 * bfd * z)))
                             * area
-                            + ((f64::sqrt(so) / n_cc) * (5.0 / 3.0) * (h - bfd).powf(2.0 / 3.0))
+                            + (so.sqrt() / n_cc)
+                                * (5.0 / 3.0)
+                                * (h - bfd).powf(2.0 / 3.0)
                                 * area_c)
                             / (area + area_c),
                     );
+                } else if h > 0.0 {
+                    ck = f32::max(
+                        0.0,
+                        (so.sqrt() / n)
+                            * ((5.0 / 3.0) * pow_2_3(r)
+                                - (2.0 / 3.0)
+                                    * pow_5_3(r)
+                                    * (2.0 * (1.0 + z * z).sqrt() / (bw + 2.0 * h * z))),
+                    );
                 } else {
-                    if h > 0.0 {
-                        ck = f64::max(
-                            0.0,
-                            (f64::sqrt(so) / n)
-                                * ((5.0 / 3.0) * r.powf(2.0 / 3.0)
-                                    - ((2.0 / 3.0)
-                                        * r.powf(5.0 / 3.0)
-                                        * (2.0 * f64::sqrt(1.0 + z * z) / (bw + 2.0 * h * z)))),
-                        );
-                    } else {
-                        ck = 0.0;
-                    }
+                    ck = 0.0;
                 }
 
-                if ck > 0.0 {
-                    km = f64::max(dt, dx / ck);
-                } else {
-                    km = dt;
-                }
+                km = if ck > 0.0 { f32::max(dt, dx / ck) } else { dt };
 
-                let flow_sum = (c1 * qup) + (c2 * quc) + (c3 * qdp) + c4;
+                let flow_sum = c1 * qup + c2 * quc + c3 * qdp + c4;
 
-                if h > bfd {
-                    // Water outside of defined channel
-                    x = f64::min(
+                // Calculate X parameter for h (interval = 2)
+                if h > bfd && tw_cc > 0.0 && n_cc > 0.0 && ck > 0.0 {
+                    x = f32::min(
                         0.5,
-                        f64::max(
+                        f32::max(
                             0.25,
                             0.5 * (1.0 - (flow_sum / (2.0 * tw_cc * so * ck * dx))),
                         ),
                     );
+                } else if ck > 0.0 {
+                    x = f32::min(
+                        0.5,
+                        f32::max(0.25, 0.5 * (1.0 - (flow_sum / (2.0 * twl * so * ck * dx)))),
+                    );
                 } else {
-                    if ck > 0.0 {
-                        x = f64::min(
-                            0.5,
-                            f64::max(0.25, 0.5 * (1.0 - (flow_sum / (2.0 * twl * so * ck * dx)))),
-                        );
-                    } else {
-                        x = 0.5;
-                    }
+                    x = 0.5;
                 }
 
-                d = km * (1.0 - x) + dt / 2.0; // Seconds
+                d = km * (1.0 - x) + dt / 2.0;
                 if d == 0.0 {
-                    panic!(
-                        "FATAL ERROR: D is 0 in MUSKINGCUNGE: km={}, x={}, dt={}, d={}",
-                        km, x, dt, d
-                    );
+                    panic!("FATAL ERROR: D is 0 in MUSKINGCUNGE");
                 }
 
                 c1 = (km * x + dt / 2.0) / d;
@@ -284,21 +260,19 @@ pub fn submuskingcunge(
                 c4 = (ql * dt) / d;
 
                 // Check for negative flow due to channel loss
-                if c4 < 0.0 && f64::abs(c4) > (c1 * qup) + (c2 * quc) + (c3 * qdp) {
-                    c4 = -((c1 * qup) + (c2 * quc) + (c3 * qdp));
+                if c4 < 0.0 && c4.abs() > (c1 * qup + c2 * quc + c3 * qdp) {
+                    c4 = -(c1 * qup + c2 * quc + c3 * qdp);
                 }
 
-                if (wp + wp_c) > 0.0 {
+                if wp + wp_c > 0.0 {
                     let manning_avg = ((wp * n) + (wp_c * n_cc)) / (wp + wp_c);
-                    qj = ((c1 * qup) + (c2 * quc) + (c3 * qdp) + c4)
-                        - ((1.0 / manning_avg)
-                            * (area + area_c)
-                            * r.powf(2.0 / 3.0)
-                            * f64::sqrt(so));
+                    qj = (c1 * qup + c2 * quc + c3 * qdp + c4)
+                        - ((1.0 / manning_avg) * (area + area_c) * pow_2_3(r) * so.sqrt());
                 }
 
+                // Update h using secant method
                 if (qj_0 - qj) != 0.0 {
-                    h_1 = h - ((qj * (h_0 - h)) / (qj_0 - qj)); // Update h, 3rd estimate
+                    h_1 = h - (qj * (h_0 - h) / (qj_0 - qj));
                     if h_1 < 0.0 {
                         h_1 = h;
                     }
@@ -307,19 +281,18 @@ pub fn submuskingcunge(
                 }
 
                 if h > 0.0 {
-                    rerror = f64::abs((h_1 - h) / h); // Relative error between new estimate and 2nd estimate
-                    aerror = f64::abs(h_1 - h); // Absolute error
+                    rerror = ((h_1 - h) / h).abs();
+                    aerror = (h_1 - h).abs();
                 } else {
                     rerror = 0.0;
                     aerror = 0.9;
                 }
 
-                h_0 = f64::max(0.0, h);
-                h = f64::max(0.0, h_1);
+                h_0 = f32::max(0.0, h);
+                h = f32::max(0.0, h_1);
                 iter += 1;
 
                 if h < mindepth {
-                    // Exit loop if depth is very small
                     break;
                 }
             }
@@ -327,46 +300,34 @@ pub fn submuskingcunge(
             if iter >= maxiter {
                 tries += 1;
                 if tries <= 4 {
-                    // Expand the search space
                     h = h * 1.33;
                     h_0 = h_0 * 0.67;
-                    maxiter = maxiter + 25; // Increase the number of allowable iterations
+                    maxiter = maxiter + 25;
                     continue 'outer;
                 }
 
                 eprintln!("Musk Cunge WARNING: Failure to converge");
                 eprintln!("err,iters,tries: {} {} {}", rerror, iter, tries);
-                eprintln!("Ck,X,dt,Km: {} {} {} {}", ck, x, dt, km);
-                eprintln!("So,dx,h: {} {} {}", so, dx, h);
-                eprintln!("qup,quc,qdp,ql: {} {} {} {}", qup, quc, qdp, ql);
-                eprintln!("bfd,Bw,Tw,Twl: {} {} {} {}", bfd, bw, tw, twl);
-
-                let flow_sum = (c1 * qup) + (c2 * quc) + (c3 * qdp) + c4;
-                let manning_avg = ((wp * n) + (wp_c * n_cc)) / (wp + wp_c);
-                let manning_term =
-                    (1.0 / manning_avg) * (area + area_c) * r.powf(2.0 / 3.0) * f64::sqrt(so);
-
-                eprintln!("Qmc,Qmn: {} {}", flow_sum, manning_term);
             }
 
-            // Calculate flow
-            let flow_sum = (c1 * qup) + (c2 * quc) + (c3 * qdp) + c4;
+            // Calculate final flow
+            let flow_sum = c1 * qup + c2 * quc + c3 * qdp + c4;
 
             if flow_sum < 0.0 {
-                if c4 < 0.0 && f64::abs(c4) > (c1 * qup) + (c2 * quc) + (c3 * qdp) {
-                    // Channel loss greater than water in channel
+                if c4 < 0.0 && c4.abs() > (c1 * qup + c2 * quc + c3 * qdp) {
                     qdc = 0.0;
                 } else {
-                    qdc = f64::max((c1 * qup) + (c2 * quc) + c4, (c1 * qup) + (c3 * qdp) + c4);
+                    qdc = f32::max(c1 * qup + c2 * quc + c4, c1 * qup + c3 * qdp + c4);
                 }
             } else {
-                qdc = flow_sum; // pg 295 Bedient huber
+                qdc = flow_sum;
             }
 
-            twl = bw + (2.0 * z * h);
+            // Calculate velocity using simplified hydraulic radius (matching Fortran)
+            twl = bw + 2.0 * z * h;
             r = (h * (bw + twl) / 2.0)
-                / (bw + 2.0 * f64::sqrt(((twl - bw) / 2.0).powf(2.0) + h.powf(2.0)));
-            velc = (1.0 / n) * r.powf(2.0 / 3.0) * f64::sqrt(so); // Average velocity in m/s
+                / (bw + 2.0 * (((twl - bw) / 2.0).powi(2) + h.powi(2)).sqrt());
+            velc = (1.0 / n) * pow_2_3(r) * so.sqrt();
             depth_c = h;
 
             break;
@@ -374,9 +335,47 @@ pub fn submuskingcunge(
     } else {
         // No flow to route
         qdc = 0.0;
+        velc = 0.0;
         depth_c = 0.0;
     }
 
-    // Return the calculated values
-    (qdc, velc, depth_c)
+    // Calculate Courant number (matching Fortran courant subroutine)
+    if depth_c > 0.0 {
+        let h_gt_bf = f32::max(depth_c - bfd, 0.0);
+        let h_lt_bf = f32::min(bfd, depth_c);
+
+        // Exception for NWM 3.0: if depth > bankfull but floodplain width is zero,
+        // extend trapezoidal channel upwards
+        let (h_gt_bf, h_lt_bf) = if h_gt_bf > 0.0 && tw_cc <= 0.0 {
+            (0.0, depth_c)
+        } else {
+            (h_gt_bf, h_lt_bf)
+        };
+
+        let area = (bw + h_lt_bf * z) * h_lt_bf;
+        let wp = bw + 2.0 * h_lt_bf * (1.0 + z * z).sqrt();
+        let area_c = tw_cc * h_gt_bf;
+        let wp_c = if h_gt_bf > 0.0 {
+            tw_cc + 2.0 * h_gt_bf
+        } else {
+            0.0
+        };
+        let r = (area + area_c) / (wp + wp_c);
+
+        ck = f32::max(
+            0.0,
+            ((so.sqrt() / n)
+                * ((5.0 / 3.0) * pow_2_3(r)
+                    - (2.0 / 3.0)
+                        * pow_5_3(r)
+                        * (2.0 * (1.0 + z * z).sqrt() / (bw + 2.0 * h_lt_bf * z)))
+                * area
+                + (so.sqrt() / n_cc) * (5.0 / 3.0) * h_gt_bf.powf(2.0 / 3.0) * area_c)
+                / (area + area_c),
+        );
+
+        cn = ck * (dt / dx);
+    }
+
+    (qdc, velc, depth_c, ck, cn, x)
 }

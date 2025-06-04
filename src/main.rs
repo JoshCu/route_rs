@@ -1,6 +1,9 @@
+use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDateTime};
-use std::error::Error;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::Arc;
 
+mod cli;
 mod config;
 mod io;
 mod mc_kernel;
@@ -8,56 +11,32 @@ mod network;
 mod routing;
 mod state;
 
+use cli::get_args;
 use config::{ColumnConfig, OutputFormat};
-use io::{
-    csv::load_external_flows_parallel, netcdf::write_netcdf_output, results::SimulationResults,
-};
+use io::netcdf::init_netcdf_output;
 use network::build_network_topology;
-use routing::process_timestep;
-use state::NetworkState;
+use routing::process_routing_parallel;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<()> {
     // Configuration
-    let db_path = "tests/gage-10154200/config/gage-10154200_subset.gpkg";
-    let internal_timestep_seconds = 300.0;
-    let dt = internal_timestep_seconds;
-
-    // Output format configuration (can be made a command-line argument)
-    let output_format = OutputFormat::Both; // Change to Csv, NetCdf, or Both as needed
-
-    // Directory containing CSV files (one per catchment)
-    let csv_dir = "tests/gage-10154200/outputs/ngen/";
+    let (_, csv_dir, db_path, internal_timestep_seconds) = get_args()?;
+    let dt = internal_timestep_seconds as f32;
+    let output_format = OutputFormat::NetCdf;
 
     // Initialize SQLite connection
-    let conn = rusqlite::Connection::open(db_path)?;
+    let conn = rusqlite::Connection::open(&db_path)
+        .with_context(|| format!("Failed to open database: {:?}", db_path))?;
 
-    // Initialize column configuration
     let column_config = ColumnConfig::new();
 
     // Build network topology
-    let topology = build_network_topology(&conn, &column_config)?;
+    println!("Building network topology...");
+    let topology = build_network_topology(&conn, &column_config, &csv_dir)?;
 
-    // Initialize network state
-    let mut network_state = NetworkState::new();
-
-    // Load external flows in parallel (this is I/O bound and benefits from parallelization)
-    println!("Loading external flows in parallel...");
-    network_state.external_flows = load_external_flows_parallel(&topology, csv_dir);
-
-    // Load channel parameters and prepare features for NetCDF
-    let (channel_params_map, feature_map, features) = network::load_channel_parameters(
-        &conn,
-        &topology,
-        &column_config,
-        &mut network_state,
-        &output_format,
-    )?;
-
-    // Initialize simulation results for NetCDF
-    let mut sim_results = SimulationResults::new();
-    if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
-        sim_results.initialize_features(features);
-    }
+    // Load channel parameters
+    println!("Loading channel parameters...");
+    let (channel_params_map, _feature_map, features) =
+        network::load_channel_parameters(&conn, &topology, &column_config, &output_format)?;
 
     // Set up CSV output if needed
     let mut csv_writer = if matches!(output_format, OutputFormat::Csv | OutputFormat::Both) {
@@ -66,72 +45,83 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    // Determine simulation period
-    let max_external_steps = network_state
-        .external_flows
-        .values()
-        .flat_map(|flows| flows.keys())
-        .max()
-        .copied()
-        .unwrap_or(0);
+    // Get simulation parameters
+    let (max_external_steps, reference_time) = get_simulation_params(&csv_dir, &features)?;
 
-    let reference_time = NaiveDateTime::parse_from_str("2000-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")?;
     let start_time = reference_time;
     let end_time = start_time + Duration::seconds((3600 * max_external_steps) as i64);
 
-    println!("Simulation period: {} to {}", start_time, end_time);
-    println!(
-        "Using internal timestep of {} seconds",
-        internal_timestep_seconds
+    let external_timestep_seconds = 3600;
+    let total_timesteps =
+        (max_external_steps + 1) * (external_timestep_seconds / internal_timestep_seconds);
+
+    println!("\nSimulation Configuration:");
+    println!("  Period: {} to {}", start_time, end_time);
+    println!("  Internal timestep: {} seconds", internal_timestep_seconds);
+    println!("  Network nodes: {}", topology.routing_order.len());
+    println!("  Total timesteps: {}", total_timesteps);
+
+    // Initialize NetCDF output
+    let timesteps: Vec<f64> = (0..=max_external_steps)
+        .map(|step| (step * 3600) as f64)
+        .collect();
+
+    let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
+    let netcdf_writer = init_netcdf_output(
+        &nc_filename,
+        topology.routing_order.len(),
+        timesteps,
+        &reference_time,
+    )?;
+
+    // Create progress bar
+    let pb = ProgressBar::new(topology.routing_order.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} nodes ({eta})")?
+            .progress_chars("#>-")
     );
-    println!("Processing {} network nodes", topology.routing_order.len());
 
-    // Main routing loop
-    let mut current_time = start_time;
-    let mut step_idx = 0;
-
-    while step_idx <= max_external_steps * 12 {
-        let current_external_idx = step_idx / 12;
-
-        // Add timestep to results for NetCDF (only at output intervals)
-        if step_idx % 12 == 0 && matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both)
-        {
-            let time_seconds = (current_time - reference_time).num_seconds() as f64;
-            sim_results.add_timestep(time_seconds);
-        }
-
-        // Process the timestep
-        process_timestep(
-            &topology,
-            &mut network_state,
-            &channel_params_map,
-            &feature_map,
-            current_external_idx,
-            dt,
-            step_idx,
-            &mut csv_writer,
-            &mut sim_results,
-            &output_format,
-        )?;
-
-        // Advance to next timestep
-        current_time = current_time + Duration::seconds(internal_timestep_seconds as i64);
-        step_idx += 1;
-    }
+    // Run parallel routing
+    println!("\nStarting parallel wave-front routing...");
+    process_routing_parallel(
+        &topology,
+        &channel_params_map,
+        total_timesteps,
+        dt,
+        netcdf_writer,
+        Arc::new(pb),
+    )?;
 
     // Final flush for CSV
     if let Some(mut wtr) = csv_writer {
-        wtr.flush()?;
+        wtr.flush().context("Failed to flush CSV writer")?;
         println!("CSV results saved to network_routing_results.csv");
     }
 
-    // Write NetCDF output if needed
-    if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
-        let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
-        write_netcdf_output(&nc_filename, &sim_results, &reference_time)?;
-        println!("NetCDF results saved to {}", nc_filename);
-    }
-
-    println!("Network routing complete.");
+    println!(
+        "\nNetwork routing complete. Output saved to {}",
+        nc_filename
+    );
     Ok(())
+}
+
+fn get_simulation_params(
+    csv_dir: &std::path::PathBuf,
+    features: &[i64],
+) -> Result<(usize, NaiveDateTime)> {
+    let first_id = features
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No features found"))?;
+
+    let file_name = csv_dir.join(format!("cat-{}.csv", first_id));
+    let content = std::fs::read_to_string(&file_name)
+        .with_context(|| format!("Failed to read file: {:?}", file_name))?;
+
+    let max_external_steps = content.lines().count().saturating_sub(2);
+
+    let reference_time = NaiveDateTime::parse_from_str("2000-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")
+        .context("Failed to parse reference time")?;
+
+    Ok((max_external_steps, reference_time))
 }
