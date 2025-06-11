@@ -1,9 +1,8 @@
-use crate::config::{ChannelParams, ColumnConfig, OutputFormat};
+use crate::config::{ChannelParams, ColumnConfig};
 use crate::state::NodeStatus;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{Write, stdout};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -211,25 +210,29 @@ pub fn build_network_topology(
     Ok(topology)
 }
 
-// Function to fetch all channel parameters from SQLite in one query
-pub fn get_all_channel_params(
+// Fetch all channel parameters in a single query
+pub fn load_channel_parameters(
     conn: &Connection,
-    channel_ids: &[u32],
+    topology: &NetworkTopology,
     config: &ColumnConfig,
 ) -> Result<HashMap<u32, ChannelParams>> {
-    if channel_ids.is_empty() {
+    if topology.routing_order.is_empty() {
         return Ok(HashMap::new());
     }
 
-    // Build query with placeholders for all IDs
-    let placeholders = channel_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(", ");
+    println!(
+        "Loading channel parameters for {} nodes...",
+        topology.routing_order.len()
+    );
+
+    // Build single query for all IDs
+    let wb_ids = topology.routing_order.iter().map(|id| format!("wb-{}", id));
+
+    let placeholders = vec!["?"; wb_ids.len()].join(",");
 
     let query = format!(
-        "SELECT {}, {}, {}, {}, {}, {}, {}, {}, {} FROM 'flowpath-attributes' WHERE {} IN ({})",
+        "SELECT {0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8} \
+         FROM 'flowpath-attributes' WHERE {0} IN ({9})",
         config.key,
         config.dx,
         config.n,
@@ -239,7 +242,6 @@ pub fn get_all_channel_params(
         config.tw,
         config.twcc,
         config.cs,
-        config.key,
         placeholders
     );
 
@@ -247,93 +249,56 @@ pub fn get_all_channel_params(
         .prepare(&query)
         .context("Failed to prepare channel params query")?;
 
-    // Convert channel IDs to wb-prefixed format
-    let wb_ids: Vec<String> = channel_ids.iter().map(|id| format!("wb-{}", id)).collect();
+    // Execute query and collect results
+    let params_vec: Vec<_> = stmt
+        .query_map(rusqlite::params_from_iter(wb_ids), |row| {
+            let wb_id: String = row.get(0)?;
+            let id = wb_id
+                .strip_prefix("wb-")
+                .and_then(|s| s.parse::<u32>().ok())
+                .ok_or(rusqlite::Error::InvalidQuery)?;
 
-    // Convert to dynamic array of references for query
-    let params: Vec<&dyn rusqlite::ToSql> =
-        wb_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            Ok((
+                id,
+                ChannelParams {
+                    dx: row.get(1)?,
+                    n: row.get(2)?,
+                    ncc: row.get(3)?,
+                    s0: row.get(4)?,
+                    bw: row.get(5)?,
+                    tw: row.get(6)?,
+                    twcc: row.get(7)?,
+                    cs: row.get(8)?,
+                },
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to read channel parameters")?;
 
-    let mut channel_params_map = HashMap::new();
+    // Build output structures
+    let channel_params_map: HashMap<u32, ChannelParams> = params_vec.into_iter().collect();
 
-    let rows = stmt.query_map(&params[..], |row| {
-        let wb_id: String = row.get(0)?;
-        let channel_id = wb_id
-            .split('-')
-            .nth(1)
-            .and_then(|s| s.parse::<u32>().ok())
-            .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
+    // Report results
+    let loaded = channel_params_map.len();
+    let total = topology.routing_order.len();
 
-        let params = ChannelParams {
-            dx: row.get(1)?,
-            n: row.get(2)?,
-            ncc: row.get(3)?,
-            s0: row.get(4)?,
-            bw: row.get(5)?,
-            tw: row.get(6)?,
-            twcc: row.get(7)?,
-            cs: row.get(8)?,
-        };
+    println!(
+        "Successfully loaded parameters for {}/{} nodes",
+        loaded, total
+    );
 
-        Ok((channel_id, params))
-    })?;
-
-    for row in rows {
-        let (id, params) = row.context("Failed to read channel parameters")?;
-        channel_params_map.insert(id, params);
+    if loaded < total {
+        let missing: Vec<_> = topology
+            .routing_order
+            .iter()
+            .filter(|id| !channel_params_map.contains_key(id))
+            .collect();
+        println!(
+            "Warning: Missing parameters for {} nodes: {:?}",
+            missing.len(),
+            missing
+        );
     }
 
     Ok(channel_params_map)
-}
-
-// Load channel parameters and prepare features for NetCDF
-pub fn load_channel_parameters(
-    conn: &Connection,
-    topology: &NetworkTopology,
-    config: &ColumnConfig,
-    output_format: &OutputFormat,
-) -> Result<(HashMap<u32, ChannelParams>, HashMap<u32, usize>, Vec<i64>)> {
-    let mut feature_map = HashMap::new();
-    let mut features = Vec::new();
-
-    println!(
-        "Loading channel parameters for {} nodes...",
-        topology.routing_order.len()
-    );
-
-    // Fetch all parameters in one query
-    let channel_params_map = get_all_channel_params(conn, &topology.routing_order, config)?;
-
-    // Build feature map for NetCDF if needed
-    if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
-        for id in &topology.routing_order {
-            if channel_params_map.contains_key(id) {
-                feature_map.insert(*id, features.len());
-                features.push(i64::from(*id));
-            }
-        }
-    }
-
-    // Report missing parameters
-    let missing_count = topology.routing_order.len() - channel_params_map.len();
-    if missing_count > 0 {
-        println!(
-            "Warning: Failed to load parameters for {} nodes",
-            missing_count
-        );
-
-        // Optionally log which IDs are missing
-        for id in &topology.routing_order {
-            if !channel_params_map.contains_key(id) {
-                println!("Missing parameters for node: {}", id);
-            }
-        }
-    }
-
-    println!(
-        "Successfully loaded parameters for {} nodes",
-        channel_params_map.len()
-    );
-
-    Ok((channel_params_map, feature_map, features))
 }

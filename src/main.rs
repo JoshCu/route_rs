@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDateTime};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 mod cli;
@@ -12,7 +13,7 @@ mod routing;
 mod state;
 
 use cli::get_args;
-use config::{ColumnConfig, OutputFormat};
+use config::{ChannelParams, ColumnConfig, OutputFormat};
 use io::netcdf::init_netcdf_output;
 use network::build_network_topology;
 use routing::process_routing_parallel;
@@ -35,8 +36,7 @@ fn main() -> Result<()> {
 
     // Load channel parameters
     println!("Loading channel parameters...");
-    let (channel_params_map, _feature_map, features) =
-        network::load_channel_parameters(&conn, &topology, &column_config, &output_format)?;
+    let channel_params_map = network::load_channel_parameters(&conn, &topology, &column_config)?;
 
     // Set up CSV output if needed
     let mut csv_writer = if matches!(output_format, OutputFormat::Csv | OutputFormat::Both) {
@@ -46,7 +46,8 @@ fn main() -> Result<()> {
     };
 
     // Get simulation parameters
-    let (max_external_steps, reference_time) = get_simulation_params(&csv_dir, &features)?;
+    let (max_external_steps, reference_time) =
+        get_simulation_params(&csv_dir, &channel_params_map)?;
 
     let start_time = reference_time;
     let end_time = start_time + Duration::seconds((3600 * max_external_steps) as i64);
@@ -108,10 +109,11 @@ fn main() -> Result<()> {
 
 fn get_simulation_params(
     csv_dir: &std::path::PathBuf,
-    features: &[i64],
+    features: &HashMap<u32, ChannelParams>,
 ) -> Result<(usize, NaiveDateTime)> {
     let first_id = features
-        .first()
+        .keys()
+        .next()
         .ok_or_else(|| anyhow::anyhow!("No features found"))?;
 
     let file_name = csv_dir.join(format!("cat-{}.csv", first_id));
