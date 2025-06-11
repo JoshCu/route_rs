@@ -105,7 +105,9 @@ impl NetworkTopology {
             if degree == 0 {
                 queue.push_back(*id);
                 if let Some(node) = self.nodes.get_mut(id) {
-                    let mut status = node.status.write()
+                    let mut status = node
+                        .status
+                        .write()
                         .map_err(|e| anyhow::anyhow!("Failed to acquire write lock: {}", e))?;
                     *status = NodeStatus::Ready;
                 }
@@ -113,7 +115,9 @@ impl NetworkTopology {
         }
 
         if queue.is_empty() {
-            return Err(anyhow::anyhow!("No headwater nodes found - possible cycle in network"));
+            return Err(anyhow::anyhow!(
+                "No headwater nodes found - possible cycle in network"
+            ));
         }
 
         self.routing_order.clear();
@@ -145,16 +149,6 @@ impl NetworkTopology {
     }
 }
 
-pub fn get_area_sqkm(node_id: &u32, conn: &Connection) -> Result<Option<f32>> {
-    let id_string = format!("wb-{}", node_id);
-    let area_query = "SELECT areasqkm FROM 'divides' WHERE id = ?";
-    let mut stmt = conn.prepare(area_query)
-        .context("Failed to prepare area query")?;
-    let row = stmt.query_row([id_string], |row| Ok(row.get::<_, Option<f32>>(0)?))
-        .context("Failed to query area")?;
-    Ok(row)
-}
-
 // Function to build network topology from database
 pub fn build_network_topology(
     conn: &Connection,
@@ -163,56 +157,39 @@ pub fn build_network_topology(
 ) -> Result<NetworkTopology> {
     let mut topology = NetworkTopology::new();
 
-    // Query nexus network table to get id-toid relationships
     let network_query = format!(
-        "SELECT {}, {} FROM 'flowpaths' WHERE {} IS NOT NULL GROUP BY {}",
+        "SELECT {}, {}, areasqkm FROM 'flowpaths' WHERE {} IS NOT NULL GROUP BY {}",
         config.key, config.downstream, config.downstream, config.key
     );
-
-    let mut stmt = conn.prepare(&network_query)
+    let mut stmt = conn
+        .prepare(&network_query)
         .context("Failed to prepare network query")?;
-    
+
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, f32>(2)?,
         ))
     })?;
 
-    // Collect nexus relationships and all nexus IDs
-    let mut relationships = Vec::new();
-    let mut all_ids = HashSet::new();
-
     for row in rows {
-        let (id, downstream_id) = row.context("Failed to read row")?;
-        
-        let n_id = id.split('-')
+        let (id, downstream_id, area_sqkm) = row.context("Failed to read row")?;
+
+        let n_id = id
+            .split('-')
             .nth(1)
             .and_then(|s| s.parse::<u32>().ok())
             .ok_or_else(|| anyhow::anyhow!("Invalid ID format: {}", id))?;
-        
-        all_ids.insert(n_id);
-        
-        let n_downstream_id = downstream_id.as_ref()
-            .and_then(|s| s.split('-').nth(1))
-            .and_then(|s| s.parse::<u32>().ok());
-        
-        relationships.push((n_id, n_downstream_id));
-    }
 
-    // Build topology
-    for (id, downstream_id) in relationships {
-        // Check if downstream nexus exists in the network
-        let validated_downstream = downstream_id
-            .filter(|ds| all_ids.contains(ds));
-        
-        if downstream_id.is_some() && validated_downstream.is_none() {
-            println!("Warning: id {} flows to {:?} which is outside the domain", id, downstream_id);
-        }
-        
-        let area = get_area_sqkm(&id, conn)?;
-        let qlat_file_path = csv_dir.join(format!("cat-{}.csv", id));
-        topology.add_node(id, validated_downstream, area, qlat_file_path);
+        let n_downstream_id = downstream_id
+            .split('-')
+            .nth(1)
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or_else(|| anyhow::anyhow!("Invalid toID format: {}", downstream_id))?;
+
+        let qlat_file_path = csv_dir.join(format!("cat-{}.csv", n_id));
+        topology.add_node(n_id, Some(n_downstream_id), Some(area_sqkm), qlat_file_path);
     }
 
     // Build upstream connections
@@ -230,18 +207,30 @@ pub fn build_network_topology(
             .filter(|n| n.downstream_id.is_none())
             .count()
     );
-    
+
     Ok(topology)
 }
 
-// Function to fetch channel parameters from SQLite
-pub fn get_channel_params(
+// Function to fetch all channel parameters from SQLite in one query
+pub fn get_all_channel_params(
     conn: &Connection,
-    channel_id: &u32,
+    channel_ids: &[u32],
     config: &ColumnConfig,
-) -> Result<ChannelParams> {
+) -> Result<HashMap<u32, ChannelParams>> {
+    if channel_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Build query with placeholders for all IDs
+    let placeholders = channel_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+
     let query = format!(
-        "SELECT {}, {}, {}, {}, {}, {}, {}, {} FROM 'flowpath-attributes' WHERE {} = ?",
+        "SELECT {}, {}, {}, {}, {}, {}, {}, {}, {} FROM 'flowpath-attributes' WHERE {} IN ({})",
+        config.key,
         config.dx,
         config.n,
         config.ncc,
@@ -250,28 +239,51 @@ pub fn get_channel_params(
         config.tw,
         config.twcc,
         config.cs,
-        config.key
+        config.key,
+        placeholders
     );
 
-    let mut stmt = conn.prepare(&query)
+    let mut stmt = conn
+        .prepare(&query)
         .context("Failed to prepare channel params query")?;
-    let id = format!("wb-{}", channel_id);
 
-    let channel_params = stmt.query_row([id], |row| {
-        Ok(ChannelParams {
-            dx: row.get(0)?,
-            n: row.get(1)?,
-            ncc: row.get(2)?,
-            s0: row.get(3)?,
-            bw: row.get(4)?,
-            tw: row.get(5)?,
-            twcc: row.get(6)?,
-            cs: row.get(7)?,
-        })
-    })
-    .context("Failed to query channel parameters")?;
+    // Convert channel IDs to wb-prefixed format
+    let wb_ids: Vec<String> = channel_ids.iter().map(|id| format!("wb-{}", id)).collect();
 
-    Ok(channel_params)
+    // Convert to dynamic array of references for query
+    let params: Vec<&dyn rusqlite::ToSql> =
+        wb_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+    let mut channel_params_map = HashMap::new();
+
+    let rows = stmt.query_map(&params[..], |row| {
+        let wb_id: String = row.get(0)?;
+        let channel_id = wb_id
+            .split('-')
+            .nth(1)
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
+
+        let params = ChannelParams {
+            dx: row.get(1)?,
+            n: row.get(2)?,
+            ncc: row.get(3)?,
+            s0: row.get(4)?,
+            bw: row.get(5)?,
+            tw: row.get(6)?,
+            twcc: row.get(7)?,
+            cs: row.get(8)?,
+        };
+
+        Ok((channel_id, params))
+    })?;
+
+    for row in rows {
+        let (id, params) = row.context("Failed to read channel parameters")?;
+        channel_params_map.insert(id, params);
+    }
+
+    Ok(channel_params_map)
 }
 
 // Load channel parameters and prepare features for NetCDF
@@ -281,33 +293,47 @@ pub fn load_channel_parameters(
     config: &ColumnConfig,
     output_format: &OutputFormat,
 ) -> Result<(HashMap<u32, ChannelParams>, HashMap<u32, usize>, Vec<i64>)> {
-    let mut channel_params_map = HashMap::new();
     let mut feature_map = HashMap::new();
     let mut features = Vec::new();
-    let mut lock = stdout().lock();
 
-    println!("Loading channel parameters for {} nodes...", topology.routing_order.len());
+    println!(
+        "Loading channel parameters for {} nodes...",
+        topology.routing_order.len()
+    );
 
-    for id in &topology.routing_order {
-        match get_channel_params(conn, id, config) {
-            Ok(params) => {
-                writeln!(lock, "Loaded channel parameters for {}", id)?;
-                channel_params_map.insert(*id, params);
+    // Fetch all parameters in one query
+    let channel_params_map = get_all_channel_params(conn, &topology.routing_order, config)?;
 
-                // Add to feature list for NetCDF
-                if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
-                    feature_map.insert(*id, features.len());
-                    features.push(i64::from(*id));
-                }
-            }
-            Err(e) => {
-                writeln!(lock, "Failed to load channel parameters for {}: {}", id, e)?;
-                continue;
+    // Build feature map for NetCDF if needed
+    if matches!(output_format, OutputFormat::NetCdf | OutputFormat::Both) {
+        for id in &topology.routing_order {
+            if channel_params_map.contains_key(id) {
+                feature_map.insert(*id, features.len());
+                features.push(i64::from(*id));
             }
         }
     }
 
-    println!("Successfully loaded parameters for {} nodes", channel_params_map.len());
+    // Report missing parameters
+    let missing_count = topology.routing_order.len() - channel_params_map.len();
+    if missing_count > 0 {
+        println!(
+            "Warning: Failed to load parameters for {} nodes",
+            missing_count
+        );
+
+        // Optionally log which IDs are missing
+        for id in &topology.routing_order {
+            if !channel_params_map.contains_key(id) {
+                println!("Missing parameters for node: {}", id);
+            }
+        }
+    }
+
+    println!(
+        "Successfully loaded parameters for {} nodes",
+        channel_params_map.len()
+    );
 
     Ok((channel_params_map, feature_map, features))
 }
