@@ -21,8 +21,6 @@ use io::netcdf::init_netcdf_output;
 use network::build_network_topology;
 use routing::process_routing_parallel;
 
-use crate::cli::Config;
-
 static OUTPUT_TYPE: &str = "NetCDF"; // or "CSV" or "Both"
 
 fn main() -> Result<()> {
@@ -482,10 +480,15 @@ mod tests {
             let tmp_dir = std::env::temp_dir().join(format!("rs_route_test_{:?}", kernel));
             std::fs::create_dir_all(&tmp_dir).unwrap();
 
-            let config = cli::Config {
+            let config: cli::Config = cli::Config {
                 kernel,
                 output_dir: tmp_dir.clone(),
                 ..setup_test_config()
+            };
+            let config_args: cli::CfgContext = cli::CfgContext {
+                internal_timestep_seconds: config.internal_timestep_seconds,
+                kernel: config.kernel,
+                num_threads: config.num_threads,
             };
             let result = run_routing(config, true);
             assert!(
@@ -494,9 +497,18 @@ mod tests {
                 kernel,
                 result.err()
             );
+            
 
             // Read back the output NetCDF to get total flow
-            let nc_path = tmp_dir.join("troute_output_201001010000.nc");
+            let config_args_infix: Option<String> = config_args.flags_identifier();
+
+            // let nc_path = tmp_dir.join("troute_output_201001010000.nc");
+            let nc_filename = if let Some(infix) = config_args_infix {
+                format!("troute_output_{}_201001010000.nc", infix)
+            } else {
+                format!("troute_output_201001010000.nc")
+            };
+            let nc_path = tmp_dir.join(nc_filename);
             println!("{}", nc_path.display());
             let file = netcdf::open(&nc_path).unwrap();
             let flow_var = file.variable("flow").unwrap();

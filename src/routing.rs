@@ -9,7 +9,6 @@ use crate::cli::CfgContext;
 use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use netcdf::FileMut;
-use rusqlite::config;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicUsize;
