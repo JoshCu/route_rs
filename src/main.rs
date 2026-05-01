@@ -21,6 +21,8 @@ use io::netcdf::init_netcdf_output;
 use network::build_network_topology;
 use routing::process_routing_parallel;
 
+use crate::cli::Config;
+
 static OUTPUT_TYPE: &str = "NetCDF"; // or "CSV" or "Both"
 
 fn main() -> Result<()> {
@@ -31,6 +33,11 @@ fn main() -> Result<()> {
 }
 
 fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
+    let config_args: cli::CfgContext = cli::CfgContext {
+        internal_timestep_seconds: config.internal_timestep_seconds,
+        kernel: config.kernel,
+        num_threads: config.num_threads,
+    };
     let dt: f32 = config.internal_timestep_seconds as f32;
     let db_path: std::path::PathBuf = config.gpkg_file;
     let csv_dir: std::path::PathBuf = config.csv_dir;
@@ -51,11 +58,13 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
 
     // Build network topology
     println!("Building network topology...");
-    let topology = build_network_topology(&conn, &column_config, &csv_dir)?;
+    // let topology = build_network_topology(&conn, &column_config, &csv_dir)?;
+    let topology = build_network_topology(&conn, &column_config, &csv_dir, &config_args)?;
 
     // Load channel parameters
     println!("Loading channel parameters...");
-    let channel_params_map = network::load_channel_parameters(&conn, &topology, &column_config)?;
+    let channel_params_map =
+        network::load_channel_parameters(&conn, &topology, &column_config, &config_args)?;
 
     // Set up CSV output if needed
     let csv_writer = if matches!(output_format, OutputFormat::Csv | OutputFormat::Both) {
@@ -90,7 +99,13 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
         .map(|step| (step * external_timestep_seconds) as f64)
         .collect();
 
-    let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
+    let config_args_infix: Option<String> = config_args.flags_identifier();
+    // let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
+    let nc_filename = if let Some(infix) = config_args_infix {
+        format!("troute_output_{}_{}.nc", infix, reference_time.format("%Y%m%d%H%M"))
+    } else {
+        format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"))
+    };
     let netcdf_writer = init_netcdf_output(
         config.output_dir,
         &nc_filename,
@@ -112,8 +127,18 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
 
     // Run parallel routing
     println!("\nStarting parallel wave-front routing...");
+    // process_routing_parallel(
+    //     config.kernel,
+    //     Arc::new(topology),
+    //     Arc::new(channel_params_map),
+    //     total_timesteps,
+    //     dt,
+    //     downsampling,
+    //     netcdf_writer,
+    //     Arc::new(pb),
+    //     config.num_threads,
+    // )?;
     process_routing_parallel(
-        config.kernel,
         Arc::new(topology),
         Arc::new(channel_params_map),
         total_timesteps,
@@ -121,7 +146,7 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
         downsampling,
         netcdf_writer,
         Arc::new(pb),
-        config.num_threads,
+        &config_args,
     )?;
 
     // Final flush for CSV
@@ -208,12 +233,18 @@ mod tests {
     fn test_get_simulation_params() {
         // Test that get_simulation_params correctly reads the CSV file and extracts the max external steps and reference time
         let config: cli::Config = setup_test_config();
+        let config_args: cli::CfgContext = cli::CfgContext {
+            internal_timestep_seconds: config.internal_timestep_seconds,
+            kernel: config.kernel,
+            num_threads: config.num_threads,
+        };
         let conn: rusqlite::Connection = rusqlite::Connection::open(&config.gpkg_file).unwrap();
         let column_config: ColumnConfig = ColumnConfig::new();
         let topology: network::NetworkTopology =
-            build_network_topology(&conn, &column_config, &config.csv_dir).unwrap();
+            build_network_topology(&conn, &column_config, &config.csv_dir, &config_args).unwrap();
         let channel_params_map: HashMap<u32, ChannelParams> =
-            network::load_channel_parameters(&conn, &topology, &column_config).unwrap();
+            network::load_channel_parameters(&conn, &topology, &column_config, &config_args)
+                .unwrap();
 
         let (max_external_steps, reference_time) =
             get_simulation_params(&config.csv_dir, &channel_params_map).unwrap();
@@ -229,12 +260,18 @@ mod tests {
     fn test_invalid_csv_file() {
         // Test that get_simulation_params returns an error when the CSV file is missing or invalid
         let config: cli::Config = setup_test_config();
+        let config_args: cli::CfgContext = cli::CfgContext {
+            internal_timestep_seconds: config.internal_timestep_seconds,
+            kernel: config.kernel,
+            num_threads: config.num_threads,
+        };
         let conn: rusqlite::Connection = rusqlite::Connection::open(&config.gpkg_file).unwrap();
         let column_config: ColumnConfig = ColumnConfig::new();
         let topology: network::NetworkTopology =
-            build_network_topology(&conn, &column_config, &config.csv_dir).unwrap();
+            build_network_topology(&conn, &column_config, &config.csv_dir, &config_args).unwrap();
         let channel_params_map: HashMap<u32, ChannelParams> =
-            network::load_channel_parameters(&conn, &topology, &column_config).unwrap();
+            network::load_channel_parameters(&conn, &topology, &column_config, &config_args)
+                .unwrap();
 
         // Test with non-existent file
         let invalid_csv_dir = std::path::PathBuf::from("./tests/one_cat/outputs/invalid_csv");

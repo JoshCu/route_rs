@@ -5,9 +5,11 @@ use crate::io::results::SimulationResults;
 use crate::kernel::muskingum::{MuskingumCungeInput, MuskingumCungeKernel, MuskingumCungeResult};
 use crate::network::NetworkTopology;
 use crate::state::NodeStatus;
+use crate::cli::CfgContext;
 use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use netcdf::FileMut;
+use rusqlite::config;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicUsize;
@@ -33,13 +35,15 @@ enum SchedulerMessage {
 
 // Process all timesteps for a single node (unchanged)
 fn process_node_all_timesteps(
-    kernel: MuskingumCungeKernel,
+    // kernel: MuskingumCungeKernel,
     node_id: &u32,
     topology: &NetworkTopology,
     channel_params: &ChannelParams,
     max_timesteps: usize,
     dt: f32,
+    config_args: &CfgContext,
 ) -> Result<SimulationResults> {
+    let kernel: MuskingumCungeKernel = config_args.kernel;
     let node = topology
         .nodes
         .get(node_id)
@@ -305,7 +309,7 @@ fn downsample_results(results: SimulationResults, downsampling: usize) -> Simula
 
 // Worker thread - now just receives work and processes it
 fn worker_thread(
-    kernel: MuskingumCungeKernel,
+    // kernel: MuskingumCungeKernel,
     work_rx: Receiver<WorkerMessage>,
     scheduler_tx: Sender<SchedulerMessage>,
     topology: Arc<NetworkTopology>,
@@ -315,6 +319,7 @@ fn worker_thread(
     downsampling: usize,
     writer_tx: Sender<WriterMessage>,
     progress_bar: Arc<ProgressBar>,
+    config_args: CfgContext,
 ) -> Result<()> {
     loop {
         match work_rx.recv() {
@@ -322,12 +327,13 @@ fn worker_thread(
                 // Process the node
                 if let Some(params) = channel_params_map.get(&node_id) {
                     match process_node_all_timesteps(
-                        kernel,
+                        // kernel,
                         &node_id,
                         &topology,
                         params,
                         max_timesteps,
                         dt,
+                        &config_args,
                     ) {
                         Ok(results) => {
                             // Pass full-resolution flow to downstream node
@@ -407,8 +413,18 @@ fn worker_thread(
 }
 
 // Main parallel routing function
+// pub fn process_routing_parallel(
+//     kernel: MuskingumCungeKernel,
+//     topology: Arc<NetworkTopology>,
+//     channel_params_map: Arc<HashMap<u32, ChannelParams>>,
+//     max_timesteps: usize,
+//     dt: f32,
+//     downsampling: usize,
+//     output_file: Arc<Mutex<FileMut>>,
+//     progress_bar: Arc<ProgressBar>,
+//     num_threads: usize,
+// ) -> Result<()> {
 pub fn process_routing_parallel(
-    kernel: MuskingumCungeKernel,
     topology: Arc<NetworkTopology>,
     channel_params_map: Arc<HashMap<u32, ChannelParams>>,
     max_timesteps: usize,
@@ -416,12 +432,14 @@ pub fn process_routing_parallel(
     downsampling: usize,
     output_file: Arc<Mutex<FileMut>>,
     progress_bar: Arc<ProgressBar>,
-    num_threads: usize,
+    config_args: &CfgContext,
 ) -> Result<()> {
-    let total_nodes = topology.nodes.len();
-    let completed_count = Arc::new(AtomicUsize::new(0));
-    let topology_arc = topology;
-    let channel_params_arc = channel_params_map;
+    // let kernel: MuskingumCungeKernel = config_args.kernel;
+    // let num_threads: usize = config_args.num_threads;
+    let total_nodes: usize = topology.nodes.len();
+    let completed_count: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let topology_arc: Arc<NetworkTopology> = topology;
+    let channel_params_arc: Arc<HashMap<u32, ChannelParams>> = channel_params_map;
 
     // Create channels
     let (writer_tx, writer_rx) = mpsc::channel();
@@ -430,26 +448,27 @@ pub fn process_routing_parallel(
     // Create worker channels
     println!(
         "Using {} worker threads for parallel processing",
-        num_threads
+        config_args.num_threads
     );
 
     let mut worker_txs = Vec::new();
     let mut worker_handles = Vec::new();
 
     // Spawn worker threads
-    for i in 0..num_threads {
+    for i in 0..config_args.num_threads {
         let (work_tx, work_rx) = mpsc::channel();
         worker_txs.push(work_tx);
 
-        let topo = Arc::clone(&topology_arc);
-        let params = Arc::clone(&channel_params_arc);
-        let writer = writer_tx.clone();
-        let scheduler = scheduler_tx.clone();
-        let pb = Arc::clone(&progress_bar);
+        let topo: Arc<NetworkTopology> = Arc::clone(&topology_arc);
+        let params: Arc<HashMap<u32, ChannelParams>> = Arc::clone(&channel_params_arc);
+        let writer: Sender<WriterMessage> = writer_tx.clone();
+        let scheduler: Sender<SchedulerMessage> = scheduler_tx.clone();
+        let pb: Arc<ProgressBar> = Arc::clone(&progress_bar);
+        let worker_config_args: CfgContext = config_args.clone();
 
         let handle = thread::spawn(move || {
             if let Err(e) = worker_thread(
-                kernel,
+                // /*kernel,*/ config_args.kernel,
                 work_rx,
                 scheduler,
                 topo,
@@ -459,6 +478,7 @@ pub fn process_routing_parallel(
                 downsampling,
                 writer,
                 pb,
+                worker_config_args,
             ) {
                 eprintln!("Worker {} error: {}", i, e);
             }

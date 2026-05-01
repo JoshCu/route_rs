@@ -1,3 +1,4 @@
+use crate::cli;
 use crate::config::{ChannelParams, ColumnConfig};
 use crate::state::NodeStatus;
 use anyhow::{Context, Result};
@@ -92,6 +93,7 @@ pub fn build_network_topology(
     conn: &Connection,
     config: &ColumnConfig,
     csv_dir: &PathBuf,
+    _config_args: &cli::CfgContext,
 ) -> Result<NetworkTopology> {
     let mut topology = NetworkTopology::new();
 
@@ -154,6 +156,7 @@ pub fn load_channel_parameters(
     conn: &Connection,
     topology: &NetworkTopology,
     config: &ColumnConfig,
+    _config_args: &cli::CfgContext,
 ) -> Result<HashMap<u32, ChannelParams>> {
     if topology.routing_order.is_empty() {
         return Ok(HashMap::new());
