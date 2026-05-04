@@ -137,6 +137,7 @@ pub fn get_args() -> Result<Config> {
 /// of both function signatures and call sites.
 /// 
 /// When fully implemented, 
+#[allow(unused)]
 #[derive(Debug, Clone, Copy)]
 pub struct CfgContext {
     pub internal_timestep_seconds: usize,
@@ -154,14 +155,15 @@ impl CfgContext {
     }
     /// If the provided arguments are important/different enough, provide a suffix/infix for naming
     /// the output files and distinguish them from other runs.
+    #[allow(unused)]
     pub fn flags_identifier(self) -> Option<String> {
-        let mut parts = Vec::new();
+        let mut parts: Vec<String> = Vec::new();
         // With the current setup, only the kernel type is likely to produce meaningful differences in output, so we only include that for now.
-        match self.kernel {
-            // PartialEq not implemented, so match statement works.
-            MuskingumCungeKernel::TRouteModernized => {}
-            _ => parts.push(format!("kernel-{}", self.kernel)),
-        }
+        // match self.kernel { // Leaving commented for now to avoid a potentially breaking change.
+        //     // PartialEq not implemented, so match statement works.
+        //     MuskingumCungeKernel::TRouteModernized => {}
+        //     _ => parts.push(format!("kernel-{}", self.kernel)),
+        // }
         if parts.is_empty() {
             None
         } else {

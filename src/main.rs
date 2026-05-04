@@ -92,8 +92,9 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
         .map(|step| (step * external_timestep_seconds) as f64)
         .collect();
 
-    let config_args_infix: Option<String> = config_args.flags_identifier();
+    
     // let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
+    let config_args_infix: Option<String> = config_args.flags_identifier();
     let nc_filename = if let Some(infix) = config_args_infix {
         format!("troute_output_{}_{}.nc", infix, reference_time.format("%Y%m%d%H%M"))
     } else {
