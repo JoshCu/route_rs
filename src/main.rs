@@ -31,11 +31,7 @@ fn main() -> Result<()> {
 }
 
 fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
-    let config_args: cli::CfgContext = cli::CfgContext {
-        internal_timestep_seconds: config.internal_timestep_seconds,
-        kernel: config.kernel,
-        num_threads: config.num_threads,
-    };
+    let config_args: cli::CfgContext = cli::CfgContext::from_config(&config);
     let dt: f32 = config.internal_timestep_seconds as f32;
     let db_path: std::path::PathBuf = config.gpkg_file;
     let csv_dir: std::path::PathBuf = config.csv_dir;
@@ -485,11 +481,7 @@ mod tests {
                 output_dir: tmp_dir.clone(),
                 ..setup_test_config()
             };
-            let config_args: cli::CfgContext = cli::CfgContext {
-                internal_timestep_seconds: config.internal_timestep_seconds,
-                kernel: config.kernel,
-                num_threads: config.num_threads,
-            };
+            let config_args: cli::CfgContext = cli::CfgContext::from_config(&config);
             let result = run_routing(config, true);
             assert!(
                 result.is_ok(),

@@ -145,6 +145,13 @@ pub struct CfgContext {
 }
 
 impl CfgContext {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            internal_timestep_seconds: config.internal_timestep_seconds,
+            kernel: config.kernel,
+            num_threads: config.num_threads,
+        }
+    }
     /// If the provided arguments are important/different enough, provide a suffix/infix for naming
     /// the output files and distinguish them from other runs.
     pub fn flags_identifier(self) -> Option<String> {
