@@ -215,11 +215,7 @@ mod tests {
     fn test_get_simulation_params() {
         // Test that get_simulation_params correctly reads the CSV file and extracts the max external steps and reference time
         let config: cli::Config = setup_test_config();
-        let config_args: cli::CfgContext = cli::CfgContext {
-            internal_timestep_seconds: config.internal_timestep_seconds,
-            kernel: config.kernel,
-            num_threads: config.num_threads,
-        };
+        let config_args: cli::CfgContext = cli::CfgContext::from_config(&config);
         let conn: rusqlite::Connection = rusqlite::Connection::open(&config.gpkg_file).unwrap();
         let column_config: ColumnConfig = ColumnConfig::new();
         let topology: network::NetworkTopology =
