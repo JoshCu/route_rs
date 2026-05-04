@@ -52,7 +52,6 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
 
     // Build network topology
     println!("Building network topology...");
-    // let topology = build_network_topology(&conn, &column_config, &csv_dir)?;
     let topology = build_network_topology(&conn, &column_config, &csv_dir, &config_args)?;
 
     // Load channel parameters
@@ -121,17 +120,6 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
 
     // Run parallel routing
     println!("\nStarting parallel wave-front routing...");
-    // process_routing_parallel(
-    //     config.kernel,
-    //     Arc::new(topology),
-    //     Arc::new(channel_params_map),
-    //     total_timesteps,
-    //     dt,
-    //     downsampling,
-    //     netcdf_writer,
-    //     Arc::new(pb),
-    //     config.num_threads,
-    // )?;
     process_routing_parallel(
         Arc::new(topology),
         Arc::new(channel_params_map),

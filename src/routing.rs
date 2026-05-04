@@ -34,7 +34,6 @@ enum SchedulerMessage {
 
 // Process all timesteps for a single node (unchanged)
 fn process_node_all_timesteps(
-    // kernel: MuskingumCungeKernel,
     node_id: &u32,
     topology: &NetworkTopology,
     channel_params: &ChannelParams,
@@ -308,7 +307,6 @@ fn downsample_results(results: SimulationResults, downsampling: usize) -> Simula
 
 // Worker thread - now just receives work and processes it
 fn worker_thread(
-    // kernel: MuskingumCungeKernel,
     work_rx: Receiver<WorkerMessage>,
     scheduler_tx: Sender<SchedulerMessage>,
     topology: Arc<NetworkTopology>,
@@ -326,7 +324,6 @@ fn worker_thread(
                 // Process the node
                 if let Some(params) = channel_params_map.get(&node_id) {
                     match process_node_all_timesteps(
-                        // kernel,
                         &node_id,
                         &topology,
                         params,
@@ -412,17 +409,6 @@ fn worker_thread(
 }
 
 // Main parallel routing function
-// pub fn process_routing_parallel(
-//     kernel: MuskingumCungeKernel,
-//     topology: Arc<NetworkTopology>,
-//     channel_params_map: Arc<HashMap<u32, ChannelParams>>,
-//     max_timesteps: usize,
-//     dt: f32,
-//     downsampling: usize,
-//     output_file: Arc<Mutex<FileMut>>,
-//     progress_bar: Arc<ProgressBar>,
-//     num_threads: usize,
-// ) -> Result<()> {
 pub fn process_routing_parallel(
     topology: Arc<NetworkTopology>,
     channel_params_map: Arc<HashMap<u32, ChannelParams>>,
@@ -433,8 +419,6 @@ pub fn process_routing_parallel(
     progress_bar: Arc<ProgressBar>,
     config_args: &CfgContext,
 ) -> Result<()> {
-    // let kernel: MuskingumCungeKernel = config_args.kernel;
-    // let num_threads: usize = config_args.num_threads;
     let total_nodes: usize = topology.nodes.len();
     let completed_count: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let topology_arc: Arc<NetworkTopology> = topology;
@@ -467,7 +451,6 @@ pub fn process_routing_parallel(
 
         let handle = thread::spawn(move || {
             if let Err(e) = worker_thread(
-                // /*kernel,*/ config_args.kernel,
                 work_rx,
                 scheduler,
                 topo,
