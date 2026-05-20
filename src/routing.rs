@@ -371,8 +371,8 @@ fn worker_thread(
 
                             // Downsample then send to writer
                             let downsampled = downsample_results(results, downsampling);
-                            if let Err(e) =
-                                writer_tx.send(WriterMessage::WriteResults(Arc::new(downsampled)))
+                            if let Err(e) = writer_tx
+                                .send(WriterMessage::WriteResults(Arc::new(downsampled)))
                             {
                                 eprintln!("Failed to send results to writer: {}", e);
                             }

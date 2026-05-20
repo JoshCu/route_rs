@@ -5,16 +5,6 @@ use netcdf::{self, FileMut};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-// Silence HDF5 diagnostic output (e.g. "unable to determine if file is accessible")
-// that occurs when netcdf::create checks for an existing file.
-unsafe extern "C" {
-    fn H5Eset_auto2(
-        estack_id: i64,
-        func: Option<unsafe extern "C" fn() -> i32>,
-        client_data: *mut std::ffi::c_void,
-    ) -> i32;
-}
-
 pub fn init_netcdf_output(
     output_dir: PathBuf,
     filename: &str,
@@ -22,11 +12,6 @@ pub fn init_netcdf_output(
     timesteps: Vec<f64>,
     reference_time: &NaiveDateTime,
 ) -> Result<Arc<Mutex<FileMut>>> {
-    // Suppress HDF5 diagnostic messages during file creation
-    unsafe {
-        H5Eset_auto2(0, None, std::ptr::null_mut());
-    }
-
     // Create NetCDF file
     let mut file = netcdf::create(output_dir.join(filename))
         .with_context(|| format!("Failed to create NetCDF file: {}", filename))?;

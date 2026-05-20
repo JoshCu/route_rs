@@ -1,36 +1,60 @@
 use crate::kernel::muskingum::MuskingumCungeResult;
 
-/// Pure Rust Muskingum-Cunge routing implementation.
-///
-/// Closely follows the Fortran t-route `secant2_h` / `muskingum_cunge` structure:
-///   - Interval 1 (h_0) computes X using the previous iteration's Qj_0
-///     (initialized to 0.0 on first iteration, matching uninitialized Fortran behavior).
-///   - Interval 2 (h) computes X using C1-C4 from interval 1.
-///   - C1-C4 are then recomputed for interval 2 with the correct X.
+/*
+
+Direct port of Fortran kernel
+
+Author: Brodie Alexander <baalexander2 [at] crimson.ua.edu>
+Last Updated - 30 March 2026 by Brodie Alexander
+
+*/
+// macro_rules! call_kernel {
+//     ($fn:path, $i:expr, $courant:expr) => {
+//         $fn(
+//             $i.qup, $i.quc, $i.qdp, $i.ql, $i.dt, $i.s0, $i.dx, $i.n, $i.cs, $i.bw, $i.tw,
+//             $i.tw_cc, $i.n_cc, $i.depthp, $courant,
+//         )
+//     };
+// }
+
 pub fn muskingum_cunge(
-    qup: f32,                // flow upstream previous timestep
-    quc: f32,                // flow upstream current timestep
-    qdp: f32,                // flow downstream previous timestep
-    ql: f32,                 // lateral inflow through reach (m^3/sec)
-    dt: f32,                 // routing period in seconds
-    so: f32,                 // channel bottom slope (as fraction, not %)
-    dx: f32,                 // channel length (m)
-    n: f32,                  // mannings coefficient
-    cs: f32,                 // channel side slope
-    bw: f32,                 // bottom width (meters)
-    tw: f32,                 // top width before bankfull (meters)
-    tw_cc: f32,              // top width of compound (meters)
-    n_cc: f32,               // mannings of compound
-    depth_p: f32,            // depth of flow in channel
-    calculate_courant: bool, // whether to calculate courant number
+    qup: f32,
+    quc: f32,
+    qdp: f32,
+    ql: f32,
+    dt: f32,
+    s0: f32,
+    dx: f32,
+    n: f32,
+    cs: f32,
+    bw: f32,
+    tw: f32,
+    twcc: f32,
+
+    ncc: f32,
+
+    depthp: f32,
+
+    _courant: bool,
 ) -> MuskingumCungeResult {
-    // Precompute constants
-    let z = if cs == 0.0 { 1.0 } else { 1.0 / cs };
-    let sqrt_1_z2 = (1.0 + z * z).sqrt();
-    let sqrt_so = so.sqrt();
-    let sqrt_so_n = sqrt_so / n;
-    let sqrt_so_ncc = sqrt_so / n_cc;
-    let dt_half = dt * 0.5;
+    let (mut qdc, mut velc, mut ck, mut cn, mut x) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut h_1 = 0.0;
+    let mut Qj = 0.0;
+    let mut Qj_0 = 0.0;
+
+    let mut maxiter = 100;
+
+    let mindepth = 0.01_f32;
+
+    let mut aerror = 0.01_f32;
+
+    let mut rerror = 1.0_f32;
+
+    let mut tries = 0;
+
+    let (mut C1, mut C2, mut C3, mut C4) = (0.0, 0.0, 0.0, 0.0);
+
+    let z = if cs == 0.0 { 1.0_f32 } else { 1.0_f32 / cs };
 
     let bfd = if bw > tw {
         bw / 0.00001
@@ -40,248 +64,95 @@ pub fn muskingum_cunge(
         (tw - bw) / (2.0 * z)
     };
 
-    if n <= 0.0 || so <= 0.0 || z <= 0.0 || bw <= 0.0 {
-        panic!("Error in channel coefficients");
-    }
-
-    let mut depthc = depth_p.max(0.0);
-
-    if ql <= 0.0 && qup <= 0.0 && quc <= 0.0 && qdp <= 0.0 {
-        return MuskingumCungeResult::default();
-    }
-
-    let mut h = (depthc * 1.33) + 0.01;
+    let mut depthc = depthp.max(0.0);
+    let mut h = (depthc * 1.33) + mindepth;
     let mut h_0 = depthc * 0.67;
-    let mut tries = 0;
-    let mut maxiter = 100;
-    let mindepth = 0.01;
 
-    // These persist across both intervals and across iterations,
-    // matching the Fortran where C1-C4, X, Qj_0 are shared mutable state.
-    let mut c1: f32 = 0.0;
-    let mut c2: f32 = 0.0;
-    let mut c3: f32 = 0.0;
-    let mut c4: f32 = 0.0;
-    let mut x: f32 = 0.0;
-    // Matches Fortran's uninitialized local (gfortran typically zero-initializes)
-    let mut qj_0: f32 = 0.0;
+    if ql > 0.0 || qup > 0.0 || quc > 0.0 || qdp > 0.0 || qdc > 0.0 {
+        'l110: loop {
+            let mut iter = 0;
 
-    // Precompute for bankfull conditions
-    let bw_2bfd_z = bw + 2.0 * bfd * z;
-    let two_sqrt_1_z2 = 2.0 * sqrt_1_z2;
+            'do_while_large_error: while rerror > 0.01 && aerror >= mindepth && iter <= maxiter {
+                let sec = secant2_h(
+                    z, bw, bfd, twcc, s0, n, ncc, dt, dx, qdp, ql, qup, quc, h_0, 1, &mut Qj_0,
+                    &mut C1, &mut C2, &mut C3, &mut C4, &mut x,
+                );
+                // Qj_0 = sec.Qj;
 
-    'outer: loop {
-        let mut iter = 0;
-        let mut rerror = 1.0;
-        let mut aerror = 0.01;
+                let sec = secant2_h(
+                    z, bw, bfd, twcc, s0, n, ncc, dt, dx, qdp, ql, qup, quc, h, 2, &mut Qj,
+                    &mut C1, &mut C2, &mut C3, &mut C4, &mut x,
+                );
+                // x = sec.x;
 
-        while rerror > 0.01 && aerror >= mindepth && iter <= maxiter {
-            // === Interval 1: secant2_h(h_0, interval=1) ===
-            // Matches Fortran: X uses previous qj_0, then computes C1-C4 and new qj_0
-            let twl_0 = bw + 2.0 * z * h_0;
+                // Qj = sec.Qj;
+                // (C1, C2, C3, C4) = (sec.C1, sec.C2, sec.C3, sec.C4);
 
-            let (area_0, area_c_0, wp_0, wp_c_0, r_0) =
-                hydraulic_geometry(h_0, bfd, bw, tw_cc, z, sqrt_1_z2);
+                if (Qj_0 - Qj) != 0.0 {
+                    h_1 = h - ((Qj * (h_0 - h)) / (Qj_0 - Qj));
+                    if h_1 < 0.0 {
+                        h_1 = h;
+                    }
+                } else {
+                    h_1 = h;
+                }
 
-            let r_0_2_3 = r_0.powf(2.0 / 3.0);
-            let r_0_5_3 = r_0 * r_0_2_3;
+                if h > 0.0 {
+                    rerror = f32::abs((h_1 - h) / h);
+                    aerror = f32::abs(h_1 - h);
+                } else {
+                    rerror = 0.0;
+                    aerror = 0.9;
+                }
 
-            let ck_0 = kinematic_celerity(
-                h_0,
-                bfd,
-                tw_cc,
-                n_cc,
-                r_0_2_3,
-                r_0_5_3,
-                area_0,
-                area_c_0,
-                sqrt_so_n,
-                sqrt_so_ncc,
-                two_sqrt_1_z2,
-                bw_2bfd_z,
-                bw,
-                z,
-            );
+                h_0 = h.max(0.0);
+                h = h_1.max(0.0);
+                iter += 1;
+                if h < mindepth {
+                    break 'do_while_large_error; // goto 111;
+                }
+            }
+            // 111    continue
 
-            let km_0 = if ck_0 > 0.0 { dt.max(dx / ck_0) } else { dt };
-
-            // X for interval 1: uses previous iteration's qj_0 (0.0 on first iter)
-            let x_0 = if h_0 > bfd && tw_cc > 0.0 && n_cc > 0.0 && ck_0 > 0.0 {
-                (0.5 * (1.0 - qj_0 / (2.0 * tw_cc * so * ck_0 * dx))).clamp(0.0, 0.5)
-            } else if ck_0 > 0.0 {
-                (0.5 * (1.0 - qj_0 / (2.0 * twl_0 * so * ck_0 * dx))).clamp(0.0, 0.5)
-            } else {
-                0.5
-            };
-
-            // Compute C1-C4 for interval 1 (these will be read by interval 2)
-            let d_0 = km_0 * (1.0 - x_0) + dt_half;
-            c1 = (km_0 * x_0 + dt_half) / d_0;
-            c2 = (dt_half - km_0 * x_0) / d_0;
-            c3 = (km_0 * (1.0 - x_0) - dt_half) / d_0;
-            c4 = (ql * dt) / d_0;
-
-            // Compute Qj_0 output
-            qj_0 = if wp_0 + wp_c_0 > 0.0 {
-                let manning_avg = ((wp_0 * n) + (wp_c_0 * n_cc)) / (wp_0 + wp_c_0);
-                (c1 * qup + c2 * quc + c3 * qdp + c4)
-                    - ((1.0 / manning_avg) * (area_0 + area_c_0) * r_0_2_3 * sqrt_so)
-            } else {
-                0.0
-            };
-
-            // === Interval 2: secant2_h(h, interval=2) ===
-            // Matches Fortran: X uses C1-C4 from interval 1, then recomputes C1-C4
-            let twl = bw + 2.0 * z * h;
-
-            let (area, area_c, wp, wp_c, r) = hydraulic_geometry(h, bfd, bw, tw_cc, z, sqrt_1_z2);
-
-            let r_2_3 = r.powf(2.0 / 3.0);
-            let r_5_3 = r * r_2_3;
-
-            let ck = kinematic_celerity(
-                h,
-                bfd,
-                tw_cc,
-                n_cc,
-                r_2_3,
-                r_5_3,
-                area,
-                area_c,
-                sqrt_so_n,
-                sqrt_so_ncc,
-                two_sqrt_1_z2,
-                bw_2bfd_z,
-                bw,
-                z,
-            );
-
-            let km = if ck > 0.0 { dt.max(dx / ck) } else { dt };
-
-            // X for interval 2: uses C1-C4 from interval 1 (the key coupling)
-            let flow_sum_from_interval_1 = c1 * qup + c2 * quc + c3 * qdp + c4;
-            x = if h > bfd && tw_cc > 0.0 && n_cc > 0.0 && ck > 0.0 {
-                (0.5 * (1.0 - flow_sum_from_interval_1 / (2.0 * tw_cc * so * ck * dx)))
-                    .clamp(0.25, 0.5)
-            } else if ck > 0.0 {
-                (0.5 * (1.0 - flow_sum_from_interval_1 / (2.0 * twl * so * ck * dx)))
-                    .clamp(0.25, 0.5)
-            } else {
-                0.5
-            };
-
-            // Recompute C1-C4 with interval 2's own Km and X
-            let d = km * (1.0 - x) + dt_half;
-            c1 = (km * x + dt_half) / d;
-            c2 = (dt_half - km * x) / d;
-            c3 = (km * (1.0 - x) - dt_half) / d;
-            c4 = (ql * dt) / d;
-
-            // C4 adjustment (interval 2 only, matching Fortran)
-            if c4 < 0.0 && c4.abs() > (c1 * qup + c2 * quc + c3 * qdp) {
-                c4 = -(c1 * qup + c2 * quc + c3 * qdp);
+            if iter >= maxiter {
+                tries += 1;
+                if tries <= 4 {
+                    h *= 1.33;
+                    h_0 *= 0.67;
+                    maxiter += 25;
+                    continue 'l110;
+                }
             }
 
-            // Compute Qj output
-            let qj = if wp + wp_c > 0.0 {
-                let manning_avg = ((wp * n) + (wp_c * n_cc)) / (wp + wp_c);
-                (c1 * qup + c2 * quc + c3 * qdp + c4)
-                    - ((1.0 / manning_avg) * (area + area_c) * r_2_3 * sqrt_so)
+            if ((C1 * qup) + (C2 * quc) + (C3 * qdp) + C4) < 0.0 {
+                if (C4 < 0.0) && (C4.abs() > (C1 * qup) + (C2 * quc) + (C3 * qdp)) {
+                    qdc = 0.0;
+                } else {
+                    qdc = f32::max((C1 * qup) + (C2 * quc) + C4, (C1 * qup) + (C3 * qdp) + C4);
+                }
             } else {
-                0.0
-            };
-
-            // Secant method update (Fortran uses exact != 0.0 comparison)
-            let h_1 = if qj_0 - qj != 0.0 {
-                let h_new = h - (qj * (h_0 - h) / (qj_0 - qj));
-                if h_new < 0.0 { h } else { h_new }
-            } else {
-                h
-            };
-
-            if h > 0.0 {
-                rerror = ((h_1 - h) / h).abs();
-                aerror = (h_1 - h).abs();
-            } else {
-                rerror = 0.0;
-                aerror = 0.9;
+                qdc = (C1 * qup) + (C2 * quc) + (C3 * qdp) + C4;
             }
 
-            h_0 = h.max(0.0);
-            h = h_1.max(0.0);
-            iter += 1;
+            let mut geom = hydraulic_geometry(h, bfd, bw, twcc, z);
+            let twl = geom.twl;
 
-            if h < mindepth {
-                break;
-            }
+            geom.r = (h * (bw + twl) / 2.0)
+                / (bw + 2.0 * (((twl - bw) / 2.0).powf(2.0) + h.powf(2.0)).powf(0.5));
+            velc = (1.0 / n) * (geom.r.powf(2.0 / 3.0)) * f32::sqrt(s0);
+            depthc = h;
+            break 'l110; // INVERSION OF FORTRAN GOTO: WE BREAK IF WE REACH THIS POINT
         }
-
-        if iter >= maxiter {
-            tries += 1;
-            if tries <= 4 {
-                h *= 1.33;
-                h_0 *= 0.67;
-                maxiter += 25;
-                continue 'outer;
-            }
-            eprintln!("Musk Cunge WARNING: Failure to converge");
-        }
-        break;
+    } else {
+        qdc = 0.0;
+        cn = 0.0;
+        ck = 0.0;
+        velc = 0.0;
+        depthc = 0.0;
     }
 
-    // Calculate final flow
-    let flow_sum = c1 * qup + c2 * quc + c3 * qdp + c4;
-    let qdc = if flow_sum < 0.0 {
-        if c4 < 0.0 && c4.abs() > (c1 * qup + c2 * quc + c3 * qdp) {
-            0.0
-        } else {
-            (c1 * qup + c2 * quc + c4).max(c1 * qup + c3 * qdp + c4)
-        }
-    } else {
-        flow_sum
-    };
+    courant(h, bfd, bw, twcc, ncc, s0, n, z, dx, dt, &mut ck, &mut cn);
 
-    // Calculate velocity
-    let twl = bw + 2.0 * z * h;
-    let r = (h * (bw + twl) * 0.5) / (bw + 2.0 * (((twl - bw) * 0.5).powi(2) + h.powi(2)).sqrt());
-    let velc = (1.0 / n) * r.powf(2.0 / 3.0) * sqrt_so;
-    depthc = h;
-
-    // Calculate Courant number
-    let (ck, cn) = if depthc > 0.0 && calculate_courant {
-        let mut h_gt_bf = (depthc - bfd).max(0.0);
-        let mut h_lt_bf = bfd.min(depthc);
-
-        if h_gt_bf > 0.0 && tw_cc <= 0.0 {
-            h_gt_bf = 0.0;
-            h_lt_bf = depthc;
-        }
-
-        let area = (bw + h_lt_bf * z) * h_lt_bf;
-        let wp = bw + 2.0 * h_lt_bf * sqrt_1_z2;
-        let area_c = tw_cc * h_gt_bf;
-        let wp_c = if h_gt_bf > 0.0 {
-            tw_cc + 2.0 * h_gt_bf
-        } else {
-            0.0
-        };
-        let r = (area + area_c) / (wp + wp_c);
-
-        let r_2_3 = r.powf(2.0 / 3.0);
-        let r_5_3 = r * r_2_3;
-
-        let ck = ((sqrt_so_n
-            * ((5.0 / 3.0) * r_2_3
-                - (2.0 / 3.0) * r_5_3 * (two_sqrt_1_z2 / (bw + 2.0 * h_lt_bf * z)))
-            * area
-            + sqrt_so_ncc * (5.0 / 3.0) * h_gt_bf.powf(2.0 / 3.0) * area_c)
-            / (area + area_c))
-            .max(0.0);
-
-        (ck, ck * (dt / dx))
-    } else {
-        (0.0, 0.0)
-    };
     MuskingumCungeResult {
         qdc,
         velc,
@@ -292,65 +163,235 @@ pub fn muskingum_cunge(
     }
 }
 
-/// Compute hydraulic geometry for a given depth h.
-/// Matches the Fortran `hydraulic_geometry` subroutine.
-#[inline]
-fn hydraulic_geometry(
-    h: f32,
-    bfd: f32,
-    bw: f32,
-    tw_cc: f32,
-    z: f32,
-    sqrt_1_z2: f32,
-) -> (f32, f32, f32, f32, f32) {
-    if h > bfd && tw_cc > 0.0 {
-        let h_gt_bf = h - bfd;
-        let area = (bw + bfd * z) * bfd;
-        let area_c = tw_cc * h_gt_bf;
-        let wp = bw + 2.0 * bfd * sqrt_1_z2;
-        let wp_c = tw_cc + 2.0 * h_gt_bf;
-        let r = (area + area_c) / (wp + wp_c);
-        (area, area_c, wp, wp_c, r)
-    } else {
-        let area = (bw + h * z) * h;
-        let wp = bw + 2.0 * h * sqrt_1_z2;
-        let r = if wp > 0.0 { area / wp } else { 0.0 };
-        (area, 0.0, wp, 0.0, r)
-    }
+// !**---------------------------------------------------**!
+// !*                                                     *!
+// !*                 SECANT2 SUBROUTINE                  *!
+// !*                                                     *!
+// !**---------------------------------------------------**!
+#[allow(non_snake_case)]
+#[derive(Default)]
+struct Secant2H {
+    Qj: f32,
+    C1: f32,
+    C2: f32,
+    C3: f32,
+    C4: f32,
+    x: f32,
 }
-
-/// Compute kinematic celerity Ck.
-/// Matches the celerity computation in Fortran `secant2_h`.
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn kinematic_celerity(
-    h: f32,
-    bfd: f32,
-    tw_cc: f32,
-    n_cc: f32,
-    r_2_3: f32,
-    r_5_3: f32,
-    area: f32,
-    area_c: f32,
-    sqrt_so_n: f32,
-    sqrt_so_ncc: f32,
-    two_sqrt_1_z2: f32,
-    bw_2bfd_z: f32,
-    bw: f32,
+fn secant2_h(
     z: f32,
-) -> f32 {
-    if h > bfd && tw_cc > 0.0 && n_cc > 0.0 {
-        ((sqrt_so_n
-            * ((5.0 / 3.0) * r_2_3 - (2.0 / 3.0) * r_5_3 * (two_sqrt_1_z2 / bw_2bfd_z))
-            * area
-            + sqrt_so_ncc * (5.0 / 3.0) * (h - bfd).powf(2.0 / 3.0) * area_c)
-            / (area + area_c))
-            .max(0.0)
-    } else if h > 0.0 {
-        (sqrt_so_n
-            * ((5.0 / 3.0) * r_2_3 - (2.0 / 3.0) * r_5_3 * (two_sqrt_1_z2 / (bw + 2.0 * h * z))))
-            .max(0.0)
+    bw: f32,
+    bfd: f32,
+    twcc: f32,
+    s0: f32,
+    n: f32,
+    ncc: f32,
+    dt: f32,
+    dx: f32,
+    qdp: f32,
+    ql: f32,
+    qup: f32,
+    quc: f32,
+    h: f32,
+    interval: i32,
+    Qj: &mut f32,
+    C1: &mut f32,
+    C2: &mut f32,
+    C3: &mut f32,
+    C4: &mut f32,
+    X: &mut f32,
+) -> Secant2H {
+    let mut sec = Secant2H {
+        Qj: *Qj,
+        C1: *C1,
+        C2: *C2,
+        C3: *C3,
+        C4: *C4,
+        x: *X,
+    };
+
+    let (mut twl, mut wl) = (0.0, 0.0);
+
+    let (mut wpc, mut area, mut areac) = (0.0, 0.0, 0.0);
+
+    let (mut r, mut ck, mut cn, mut km, mut d) = (0.0, 0.0, 0.0, 0.0, 0.0);
+
+    let (mut upper_interval, mut lower_interval) = (1, 2);
+
+    let geom = hydraulic_geometry(h, bfd, bw, twcc, z);
+    let (twl, r, area, areac, wp, wpc) =
+        (geom.twl, geom.r, geom.area, geom.areac, geom.wp, geom.wpc);
+
+    if h > bfd && twcc > 0.0 && ncc > 0.0 {
+        ck = f32::max(
+            0.0,
+            ((f32::sqrt(s0) / n)
+                * ((5.0 / 3.0) * r.powf(2.0 / 3.0)
+                    - ((2.0 / 3.0)
+                        * r.powf(5.0 / 3.0)
+                        * (2.0 * f32::sqrt(1.0 + z * z) / (bw + 2.0 * bfd * z))))
+                * area
+                + ((f32::sqrt(s0) / (ncc)) * (5.0 / 3.0) * (h - bfd).powf(2.0 / 3.0)) * areac)
+                / (area + areac),
+        )
+    } else if (h > 0.0) {
+        ck = f32::max(
+            0.0,
+            (f32::sqrt(s0) / n)
+                * ((5.0 / 3.0) * r.powf(2.0 / 3.0)
+                    - ((2.0 / 3.0)
+                        * r.powf(5.0 / 3.0)
+                        * (2.0 * f32::sqrt(1.0 + z * z) / (bw + 2.0 * h * z)))),
+        )
+    } else {
+        ck = 0.0;
+    }
+
+    if (ck > 0.0) {
+        km = dt.max(dx / ck);
+    } else {
+        km = dt;
+    }
+
+    if h > bfd && twcc > 0.0 && ncc > 0.0 && ck > 0.0 {
+        if (interval == upper_interval) {
+            sec.x = (0.5 * (1.0 - (sec.Qj / (2.0 * twcc * s0 * ck * dx)))).clamp(0.0, 0.5)
+        }
+
+        if (interval == lower_interval) {
+            sec.x = (0.5
+                * (1.0
+                    - (((sec.C1 * qup) + (sec.C2 * quc) + (sec.C3 * qdp) + sec.C4)
+                        / (2.0 * twcc * s0 * ck * dx))))
+                .clamp(0.25, 0.5)
+        }
+    } else if ck > 0.0 {
+        if interval == upper_interval {
+            sec.x = (0.5 * (1.0 - (sec.Qj / (2.0 * twl * s0 * ck * dx)))).clamp(0.0, 0.5)
+        }
+        if interval == lower_interval {
+            sec.x = (0.5
+                * (1.0
+                    - (((sec.C1 * qup) + (sec.C2 * quc) + (sec.C3 * qdp) + sec.C4)
+                        / (2.0 * twl * s0 * ck * dx))))
+                .clamp(0.25, 0.5)
+        }
+    } else {
+        sec.x = 0.0;
+    }
+
+    d = km * (1.0 - sec.x) + dt / 2.0;
+
+    sec.C1 = (km * sec.x + dt / 2.0) / d;
+    sec.C2 = (dt / 2.0 - km * sec.x) / d;
+    sec.C3 = (km * (1.0 - sec.x) - dt / 2.0) / d;
+    sec.C4 = (ql * dt) / d;
+
+    if interval == lower_interval
+        && sec.C4 < 0.0
+        && sec.C4.abs() > (sec.C1 * qup + sec.C2 * quc + sec.C3 * qdp)
+    {
+        sec.C4 = -(sec.C1 * qup + sec.C2 * quc + sec.C3 * qdp);
+    }
+
+    sec.Qj = if (wp + wpc) > 0.0 {
+        ((sec.C1 * qup) + (sec.C2 * quc) + (sec.C3 * qdp) + sec.C4)
+            - ((1.0 / (((wp * n) + (wpc * ncc)) / (wp + wpc)))
+                * (area + areac)
+                * (r.powf(2.0 / 3.0))
+                * f32::sqrt(s0))
     } else {
         0.0
+    };
+    *Qj = sec.Qj;
+    *C1 = sec.C1;
+    *C2 = sec.C2;
+    *C3 = sec.C3;
+    *C4 = sec.C4;
+    *X = sec.x;
+    sec
+}
+
+// !**---------------------------------------------------**!
+// !*                                                     *!
+// !*                 COURANT SUBROUTINE                  *!
+// !*                                                     *!
+// !**---------------------------------------------------**!
+fn courant(
+    h: f32,
+    bfd: f32,
+    bw: f32,
+    twcc: f32,
+    ncc: f32,
+    s0: f32,
+    n: f32,
+    z: f32,
+    dx: f32,
+    dt: f32,
+    ck: &mut f32,
+    cn: &mut f32,
+) {
+    let geom = hydraulic_geometry(h, bfd, bw, twcc, z);
+
+    *ck = f32::max(
+        0.0,
+        ((f32::sqrt(s0) / n)
+            * ((5.0 / 3.0) * geom.r.powf(2.0 / 3.0)
+                - ((2.0 / 3.0)
+                    * geom.r.powf(5.0 / 3.0)
+                    * (2.0 * f32::sqrt(1.0 + z * z) / (bw + 2.0 * geom.h_lt_bf * z))))
+            * geom.area
+            + ((f32::sqrt(s0) / (ncc)) * (5.0 / 3.0) * (geom.h_gt_bf).powf(2.0 / 3.0))
+                * geom.areac)
+            / (geom.area + geom.areac),
+    );
+
+    *cn = *ck * (dt / dx);
+}
+
+// !**---------------------------------------------------**!
+// !*                                                     *!
+// !*           Hydraulic Geometry SUBROUTINE             *!
+// !*                                                     *!
+// !**---------------------------------------------------**!
+
+#[derive(Default)]
+struct HGeometry {
+    twl: f32,
+    r: f32,
+    area: f32,
+    areac: f32,
+    wp: f32,
+    wpc: f32,
+    h_gt_bf: f32,
+    h_lt_bf: f32,
+}
+fn hydraulic_geometry(h: f32, bfd: f32, bw: f32, twcc: f32, z: f32) -> HGeometry {
+    let mut geom = HGeometry {
+        h_gt_bf: 0.0_f32.max(h - bfd),
+        h_lt_bf: h.min(bfd),
+        twl: bw + 2.0 * z * h,
+        ..Default::default()
+    };
+
+    if (geom.h_gt_bf > 0.0) && (twcc <= 0.0) {
+        geom.h_gt_bf = 0.0;
+        geom.h_lt_bf = h;
     }
+
+    geom.area = (bw + geom.h_lt_bf * z) * geom.h_lt_bf;
+
+    geom.wp = bw + 2.0 * geom.h_lt_bf * f32::sqrt(1.0 + z * z);
+
+    geom.areac = twcc * geom.h_gt_bf;
+
+    geom.wpc = if geom.h_gt_bf > 0.0 {
+        twcc + (2.0 * geom.h_gt_bf)
+    } else {
+        0.0
+    };
+
+    geom.r = (geom.area + geom.areac) / (geom.wp + geom.wpc);
+
+    geom
 }
