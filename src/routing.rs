@@ -69,8 +69,8 @@ fn process_node_all_timesteps(
     if inflow.len() == 0 && external_flows.len() == 0 {
         // if these are both empty then just return all zeros to the results
         results.flow_data = vec![0.0; max_timesteps];
-        results.velocity_data = vec![0.0; max_timesteps];
-        results.depth_data = vec![0.0; max_timesteps];
+        // results.velocity_data = vec![0.0; max_timesteps];
+        // results.depth_data = vec![0.0; max_timesteps];
         return Ok(results);
     }
 
@@ -132,7 +132,7 @@ fn process_node_all_timesteps(
             },
             false,
         );
-        let (qdc, velc, depthc) = (result.qdc, result.velc, result.depthc);
+        let (qdc, depthc) = (result.qdc, result.depthc);
         // let (qdc, velc, depthc, _, _, _) = mc_kernel::submuskingcunge(
         //     qup,
         //     upstream_flow,
@@ -152,8 +152,8 @@ fn process_node_all_timesteps(
         // );
 
         results.flow_data.push(qdc);
-        results.velocity_data.push(velc);
-        results.depth_data.push(depthc);
+        // results.velocity_data.push(velc);
+        // results.depth_data.push(depthc);
 
         qup = upstream_flow;
         qdp = qdc;
@@ -290,18 +290,18 @@ fn downsample_results(results: SimulationResults, downsampling: usize) -> Simula
     }
     let actual_timesteps = results.flow_data.len();
     let mut flow_data = Vec::with_capacity(actual_timesteps / downsampling);
-    let mut velocity_data = Vec::with_capacity(actual_timesteps / downsampling);
-    let mut depth_data = Vec::with_capacity(actual_timesteps / downsampling);
+    // let mut velocity_data = Vec::with_capacity(actual_timesteps / downsampling);
+    // let mut depth_data = Vec::with_capacity(actual_timesteps / downsampling);
     for i in (downsampling - 1..actual_timesteps).step_by(downsampling) {
         flow_data.push(results.flow_data[i]);
-        velocity_data.push(results.velocity_data[i]);
-        depth_data.push(results.depth_data[i]);
+        // velocity_data.push(results.velocity_data[i]);
+        // depth_data.push(results.depth_data[i]);
     }
     SimulationResults {
         feature_id: results.feature_id,
         flow_data,
-        velocity_data,
-        depth_data,
+        // velocity_data,
+        // depth_data,
     }
 }
 
