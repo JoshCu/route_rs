@@ -21,6 +21,7 @@ pub fn init_netcdf_output(
     _num_flowpaths: usize,
     timesteps: Vec<f64>,
     reference_time: &NaiveDateTime,
+    streamflow_only: bool,
 ) -> Result<Arc<Mutex<FileMut>>> {
     // Suppress HDF5 diagnostic messages during file creation
     unsafe {
@@ -72,23 +73,25 @@ pub fn init_netcdf_output(
     flow_var.put_attribute("units", "m3 s-1")?;
     flow_var.put_attribute("missing_value", -9999.0f32)?;
 
-    // Velocity variable
-    let mut velocity_var = file
-        .add_variable::<f32>("velocity", &["feature_id", "time"])
-        .context("Failed to add velocity variable")?;
-    velocity_var.put_attribute("_FillValue", -9999.0f32)?;
-    velocity_var.put_attribute("long_name", "Velocity")?;
-    velocity_var.put_attribute("units", "m/s")?;
-    velocity_var.put_attribute("missing_value", -9999.0f32)?;
+    if !streamflow_only {
+        // Velocity variable
+        let mut velocity_var = file
+            .add_variable::<f32>("velocity", &["feature_id", "time"])
+            .context("Failed to add velocity variable")?;
+        velocity_var.put_attribute("_FillValue", -9999.0f32)?;
+        velocity_var.put_attribute("long_name", "Velocity")?;
+        velocity_var.put_attribute("units", "m/s")?;
+        velocity_var.put_attribute("missing_value", -9999.0f32)?;
 
-    // Depth variable
-    let mut depth_var = file
-        .add_variable::<f32>("depth", &["feature_id", "time"])
-        .context("Failed to add depth variable")?;
-    depth_var.put_attribute("_FillValue", -9999.0f32)?;
-    depth_var.put_attribute("long_name", "Depth")?;
-    depth_var.put_attribute("units", "m")?;
-    depth_var.put_attribute("missing_value", -9999.0f32)?;
+        // Depth variable
+        let mut depth_var = file
+            .add_variable::<f32>("depth", &["feature_id", "time"])
+            .context("Failed to add depth variable")?;
+        depth_var.put_attribute("_FillValue", -9999.0f32)?;
+        depth_var.put_attribute("long_name", "Depth")?;
+        depth_var.put_attribute("units", "m")?;
+        depth_var.put_attribute("missing_value", -9999.0f32)?;
+    }
 
     // Global attributes
     file.add_attribute("TITLE", "OUTPUT FROM RS-ROUTE")?;
@@ -99,8 +102,8 @@ pub fn init_netcdf_output(
     file.add_attribute("code_version", "")?;
 
     // Additional expected variables
-    let _ = file.add_variable::<f32>("type", &["feature_id"])?;
-    let _ = file.add_variable::<f32>("nudge", &["feature_id"])?;
+    // let _ = file.add_variable::<f32>("type", &["feature_id"])?;
+    // let _ = file.add_variable::<f32>("nudge", &["feature_id"])?;
 
     Ok(Arc::new(Mutex::new(file)))
 }
@@ -108,6 +111,7 @@ pub fn init_netcdf_output(
 pub fn write_batch(
     output_file: &Arc<Mutex<FileMut>>,
     batch: &[Arc<SimulationResults>],
+    streamflow_only: bool,
 ) -> Result<()> {
     let mut file = output_file
         .lock()
@@ -133,8 +137,10 @@ pub fn write_batch(
     for results in batch {
         all_feature_ids.push(results.feature_id);
         all_flows.extend_from_slice(&results.flow_data);
-        all_velocities.extend_from_slice(&results.velocity_data);
-        all_depths.extend_from_slice(&results.depth_data);
+        if !streamflow_only {
+            all_velocities.extend_from_slice(&results.velocity_data);
+            all_depths.extend_from_slice(&results.depth_data);
+        }
     }
 
     // Write all feature IDs at once
@@ -158,29 +164,31 @@ pub fn write_batch(
         flow_var.put_values(row, (start_idx + i, ..))?;
     }
 
-    // Similar for velocity and depth
-    let velocity_2d: Vec<Vec<f32>> = all_velocities
-        .chunks(expected_timesteps)
-        .map(|chunk| chunk.to_vec())
-        .collect();
+    if !streamflow_only {
+        // Similar for velocity and depth
+        let velocity_2d: Vec<Vec<f32>> = all_velocities
+            .chunks(expected_timesteps)
+            .map(|chunk| chunk.to_vec())
+            .collect();
 
-    let mut velocity_var = file
-        .variable_mut("velocity")
-        .ok_or_else(|| anyhow::anyhow!("velocity variable not found"))?;
-    for (i, row) in velocity_2d.iter().enumerate() {
-        velocity_var.put_values(row, (start_idx + i, ..))?;
-    }
+        let mut velocity_var = file
+            .variable_mut("velocity")
+            .ok_or_else(|| anyhow::anyhow!("velocity variable not found"))?;
+        for (i, row) in velocity_2d.iter().enumerate() {
+            velocity_var.put_values(row, (start_idx + i, ..))?;
+        }
 
-    let depth_2d: Vec<Vec<f32>> = all_depths
-        .chunks(expected_timesteps)
-        .map(|chunk| chunk.to_vec())
-        .collect();
+        let depth_2d: Vec<Vec<f32>> = all_depths
+            .chunks(expected_timesteps)
+            .map(|chunk| chunk.to_vec())
+            .collect();
 
-    let mut depth_var = file
-        .variable_mut("depth")
-        .ok_or_else(|| anyhow::anyhow!("depth variable not found"))?;
-    for (i, row) in depth_2d.iter().enumerate() {
-        depth_var.put_values(row, (start_idx + i, ..))?;
+        let mut depth_var = file
+            .variable_mut("depth")
+            .ok_or_else(|| anyhow::anyhow!("depth variable not found"))?;
+        for (i, row) in depth_2d.iter().enumerate() {
+            depth_var.put_values(row, (start_idx + i, ..))?;
+        }
     }
 
     Ok(())
@@ -190,6 +198,7 @@ pub fn write_batch(
 pub fn _write_output(
     output_file: &Arc<Mutex<FileMut>>,
     results: &Arc<SimulationResults>,
+    streamflow_only: bool,
 ) -> Result<()> {
     // Get lock on file
     let mut file = output_file
@@ -203,12 +212,23 @@ pub fn _write_output(
     let actual_timesteps = results.flow_data.len();
     let downsampling = actual_timesteps / expected_timesteps.len();
     let mut downsampled_flow_data = Vec::with_capacity(expected_timesteps.len());
-    let mut downsampled_velocity_data = Vec::with_capacity(expected_timesteps.len());
-    let mut downsampled_depth_data = Vec::with_capacity(expected_timesteps.len());
+    let mut downsampled_velocity_data = if streamflow_only {
+        Vec::new()
+    } else {
+        Vec::with_capacity(expected_timesteps.len())
+    };
+    let mut downsampled_depth_data = if streamflow_only {
+        Vec::new()
+    } else {
+        Vec::with_capacity(expected_timesteps.len())
+    };
+
     for i in (downsampling - 1..actual_timesteps).step_by(downsampling) {
         downsampled_flow_data.push(results.flow_data[i]);
-        downsampled_velocity_data.push(results.velocity_data[i]);
-        downsampled_depth_data.push(results.depth_data[i]);
+        if !streamflow_only {
+            downsampled_velocity_data.push(results.velocity_data[i]);
+            downsampled_depth_data.push(results.depth_data[i]);
+        }
     }
 
     // Get feature variable
@@ -228,21 +248,23 @@ pub fn _write_output(
         .put_values(&downsampled_flow_data, (fidx, ..))
         .context("Failed to write flow data")?;
 
-    // Velocity variable
-    let mut velocity_var = file
-        .variable_mut("velocity")
-        .ok_or_else(|| anyhow::anyhow!("velocity variable not found"))?;
-    velocity_var
-        .put_values(&downsampled_velocity_data, (fidx, ..))
-        .context("Failed to write velocity data")?;
+    if !streamflow_only {
+        // Velocity variable
+        let mut velocity_var = file
+            .variable_mut("velocity")
+            .ok_or_else(|| anyhow::anyhow!("velocity variable not found"))?;
+        velocity_var
+            .put_values(&downsampled_velocity_data, (fidx, ..))
+            .context("Failed to write velocity data")?;
 
-    // Depth variable
-    let mut depth_var = file
-        .variable_mut("depth")
-        .ok_or_else(|| anyhow::anyhow!("depth variable not found"))?;
-    depth_var
-        .put_values(&downsampled_depth_data, (fidx, ..))
-        .context("Failed to write depth data")?;
+        // Depth variable
+        let mut depth_var = file
+            .variable_mut("depth")
+            .ok_or_else(|| anyhow::anyhow!("depth variable not found"))?;
+        depth_var
+            .put_values(&downsampled_depth_data, (fidx, ..))
+            .context("Failed to write depth data")?;
+    }
 
     Ok(())
 }
