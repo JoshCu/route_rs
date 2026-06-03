@@ -1,3 +1,4 @@
+use crate::cli::CfgContext;
 use crate::config::ChannelParams;
 use crate::io::csv::load_external_flows;
 use crate::io::netcdf::write_batch;
@@ -5,7 +6,6 @@ use crate::io::results::SimulationResults;
 use crate::kernel::muskingum::{MuskingumCungeInput, MuskingumCungeKernel, MuskingumCungeResult};
 use crate::network::NetworkTopology;
 use crate::state::NodeStatus;
-use crate::cli::CfgContext;
 use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use netcdf::FileMut;
@@ -69,8 +69,10 @@ fn process_node_all_timesteps(
     if inflow.len() == 0 && external_flows.len() == 0 {
         // if these are both empty then just return all zeros to the results
         results.flow_data = vec![0.0; max_timesteps];
-        // results.velocity_data = vec![0.0; max_timesteps];
-        // results.depth_data = vec![0.0; max_timesteps];
+        if !config_args.streamflow_only {
+            results.velocity_data = vec![0.0; max_timesteps];
+            results.depth_data = vec![0.0; max_timesteps];
+        }
         return Ok(results);
     }
 
@@ -132,7 +134,7 @@ fn process_node_all_timesteps(
             },
             false,
         );
-        let (qdc, depthc) = (result.qdc, result.depthc);
+        let (qdc, velc, depthc) = (result.qdc, result.velc, result.depthc);
         // let (qdc, velc, depthc, _, _, _) = mc_kernel::submuskingcunge(
         //     qup,
         //     upstream_flow,
@@ -152,8 +154,10 @@ fn process_node_all_timesteps(
         // );
 
         results.flow_data.push(qdc);
-        // results.velocity_data.push(velc);
-        // results.depth_data.push(depthc);
+        if !config_args.streamflow_only {
+            results.velocity_data.push(velc);
+            results.depth_data.push(depthc);
+        }
 
         qup = upstream_flow;
         qdp = qdc;
@@ -167,6 +171,7 @@ fn writer_thread(
     receiver: Receiver<WriterMessage>,
     output_file: Arc<Mutex<FileMut>>,
     batch_size: usize, // e.g., 100 nodes
+    streamflow_only: bool,
 ) -> Result<()> {
     let mut batch = Vec::new();
 
@@ -177,28 +182,28 @@ fn writer_thread(
 
                 // Write when batch is full
                 if batch.len() >= batch_size {
-                    write_batch(&output_file, &batch)?;
+                    write_batch(&output_file, &batch, streamflow_only)?;
                     batch.clear();
                 }
             }
             Ok(WriterMessage::Shutdown) => {
                 // Write remaining batch
                 if !batch.is_empty() {
-                    write_batch(&output_file, &batch)?;
+                    write_batch(&output_file, &batch, streamflow_only)?;
                 }
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Write partial batch on timeout to avoid holding data too long
                 if !batch.is_empty() {
-                    write_batch(&output_file, &batch)?;
+                    write_batch(&output_file, &batch, streamflow_only)?;
                     batch.clear();
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // All senders dropped — normal shutdown
                 if !batch.is_empty() {
-                    write_batch(&output_file, &batch)?;
+                    write_batch(&output_file, &batch, streamflow_only)?;
                 }
                 break;
             }
@@ -284,24 +289,38 @@ fn scheduler_thread(
 }
 
 // Downsample full-resolution results to output frequency
-fn downsample_results(results: SimulationResults, downsampling: usize) -> SimulationResults {
+fn downsample_results(
+    results: SimulationResults,
+    downsampling: usize,
+    streamflow_only: bool,
+) -> SimulationResults {
     if downsampling <= 1 {
         return results;
     }
     let actual_timesteps = results.flow_data.len();
     let mut flow_data = Vec::with_capacity(actual_timesteps / downsampling);
-    // let mut velocity_data = Vec::with_capacity(actual_timesteps / downsampling);
-    // let mut depth_data = Vec::with_capacity(actual_timesteps / downsampling);
+    let mut velocity_data = if streamflow_only {
+        Vec::new()
+    } else {
+        Vec::with_capacity(actual_timesteps / downsampling)
+    };
+    let mut depth_data = if streamflow_only {
+        Vec::new()
+    } else {
+        Vec::with_capacity(actual_timesteps / downsampling)
+    };
     for i in (downsampling - 1..actual_timesteps).step_by(downsampling) {
         flow_data.push(results.flow_data[i]);
-        // velocity_data.push(results.velocity_data[i]);
-        // depth_data.push(results.depth_data[i]);
+        if !streamflow_only {
+            velocity_data.push(results.velocity_data[i]);
+            depth_data.push(results.depth_data[i]);
+        }
     }
     SimulationResults {
         feature_id: results.feature_id,
         flow_data,
-        // velocity_data,
-        // depth_data,
+        velocity_data,
+        depth_data,
     }
 }
 
@@ -370,7 +389,11 @@ fn worker_thread(
                             }
 
                             // Downsample then send to writer
-                            let downsampled = downsample_results(results, downsampling);
+                            let downsampled = downsample_results(
+                                results,
+                                downsampling,
+                                config_args.streamflow_only,
+                            );
                             if let Err(e) =
                                 writer_tx.send(WriterMessage::WriteResults(Arc::new(downsampled)))
                             {
@@ -470,8 +493,14 @@ pub fn process_routing_parallel(
 
     // Spawn writer thread
     let output_file_clone = Arc::clone(&output_file);
+    let streamflow_only = config_args.streamflow_only;
     let writer_handle = thread::spawn(move || {
-        if let Err(e) = writer_thread(writer_rx, output_file_clone, min(100, total_nodes)) {
+        if let Err(e) = writer_thread(
+            writer_rx,
+            output_file_clone,
+            min(100, total_nodes),
+            streamflow_only,
+        ) {
             eprintln!("Writer thread error: {}", e);
         }
     });

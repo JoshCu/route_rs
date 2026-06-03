@@ -92,11 +92,14 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
         .map(|step| (step * external_timestep_seconds) as f64)
         .collect();
 
-    
     // let nc_filename = format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"));
     let config_args_infix: Option<String> = config_args.flags_identifier();
     let nc_filename = if let Some(infix) = config_args_infix {
-        format!("troute_output_{}_{}.nc", infix, reference_time.format("%Y%m%d%H%M"))
+        format!(
+            "troute_output_{}_{}.nc",
+            infix,
+            reference_time.format("%Y%m%d%H%M")
+        )
     } else {
         format!("troute_output_{}.nc", reference_time.format("%Y%m%d%H%M"))
     };
@@ -106,6 +109,7 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
         topology.routing_order.len(),
         timesteps,
         &reference_time,
+        config_args.streamflow_only,
     )?;
 
     // Create progress bar
@@ -207,6 +211,7 @@ mod tests {
             output_dir: std::path::PathBuf::from("./tests/one_cat/outputs/troute"),
             kernel: muskingum::MuskingumCungeKernel::TRouteModernized,
             num_threads: 1,
+            streamflow_only: false,
         }
     }
 
@@ -243,6 +248,7 @@ mod tests {
             internal_timestep_seconds: config.internal_timestep_seconds,
             kernel: config.kernel,
             num_threads: config.num_threads,
+            streamflow_only: config.streamflow_only,
         };
         let conn: rusqlite::Connection = rusqlite::Connection::open(&config.gpkg_file).unwrap();
         let column_config: ColumnConfig = ColumnConfig::new();
@@ -328,6 +334,27 @@ mod tests {
         let result = run_routing(config, true);
         let _ = std::fs::remove_dir_all(&tmp_dir);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_routing_streamflow_only() {
+        let tmp_dir = std::env::temp_dir().join("rs_route_test_streamflow_only");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let config = cli::Config {
+            output_dir: tmp_dir.clone(),
+            streamflow_only: true,
+            ..setup_test_config()
+        };
+        let result = run_routing(config, true);
+        assert!(result.is_ok());
+
+        let nc_path = tmp_dir.join("troute_output_201001010000.nc");
+        let file = netcdf::open(&nc_path).unwrap();
+        assert!(file.variable("flow").is_some());
+        assert!(file.variable("velocity").is_none());
+        assert!(file.variable("depth").is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
     fn make_test_input() -> muskingum::MuskingumCungeInput {
@@ -474,7 +501,6 @@ mod tests {
                 kernel,
                 result.err()
             );
-            
 
             // Read back the output NetCDF to get total flow
             let config_args_infix: Option<String> = config_args.flags_identifier();
@@ -526,6 +552,7 @@ mod tests {
             output_dir: std::path::PathBuf::from("./tests/invalid_test/outputs/troute"),
             kernel: muskingum::MuskingumCungeKernel::TRouteModernized,
             num_threads: 1,
+            streamflow_only: false,
         };
         let result = run_routing(invalid_config, true);
         assert!(result.is_err());

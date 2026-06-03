@@ -1,6 +1,6 @@
 use crate::kernel::muskingum::MuskingumCungeKernel;
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use colored::Colorize;
 use num_cpus;
 use std::path::PathBuf;
@@ -30,12 +30,22 @@ struct Args {
     kernel: MuskingumCungeKernel,
     #[arg(short, long, default_value_t = num_cpus::get())]
     num_threads: usize,
+    /// Write only streamflow output, omitting velocity and depth
+    #[arg(
+        long = "streamflow_only",
+        default_value_t = false,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        action = ArgAction::Set
+    )]
+    streamflow_only: bool,
 }
 pub fn print_banner(config: &Config) {
     eprintln!("   {}", "🌊 Route RS".cyan().bold());
     eprintln!("  Kernel:   {}", format!("{}", config.kernel).green());
     eprintln!("  Timestep: {}s", config.internal_timestep_seconds);
     eprintln!("  Threads:  {}", config.num_threads);
+    eprintln!("  Streamflow only: {}", config.streamflow_only);
     eprintln!(
         "  GeoPackage: {}",
         config.gpkg_file.display().to_string().dimmed()
@@ -56,15 +66,20 @@ pub struct Config {
     pub output_dir: PathBuf,
     pub kernel: MuskingumCungeKernel,
     pub num_threads: usize,
+    pub streamflow_only: bool,
 }
 
 pub fn get_args() -> Result<Config> {
     let args = Args::parse();
 
     let root_dir = args.route_dir;
-    let csv_dir = args.input_dir.unwrap_or_else(|| root_dir.join("outputs").join("ngen"));
+    let csv_dir = args
+        .input_dir
+        .unwrap_or_else(|| root_dir.join("outputs").join("ngen"));
     let config_dir = root_dir.join("config");
-    let output_dir = args.output_dir.unwrap_or_else(|| root_dir.join("outputs").join("troute"));
+    let output_dir = args
+        .output_dir
+        .unwrap_or_else(|| root_dir.join("outputs").join("troute"));
 
     // Check directories valid
     if !root_dir.exists() || !root_dir.is_dir() {
@@ -120,29 +135,31 @@ pub fn get_args() -> Result<Config> {
         output_dir,
         kernel: args.kernel,
         num_threads: args.num_threads,
+        streamflow_only: args.streamflow_only,
     };
     print_banner(&cfg);
     Ok(cfg)
 }
 
-/// The CfgContext struct is a simplified version of the Config struct that 
+/// The CfgContext struct is a simplified version of the Config struct that
 /// contains only the essential parameters needed for the routing simulation, such as the internal timestep, kernel type, and number of threads.
-/// 
+///
 /// Unlike the Config struct, however, it may include additional non-program-argument attributes
 /// that are controlled elsewhere. To facilitate this, it should be passed by reference.
-/// 
+///
 /// By removing the complex types, we can simplify a good portion of function signatures,
 /// while making it significantly easier to add top-down toggles and other control variables
 /// that might be needed at any point in the call stack, without needing to modify a large number
 /// of both function signatures and call sites.
-/// 
-/// When fully implemented, 
+///
+/// When fully implemented,
 #[allow(unused)]
 #[derive(Debug, Clone, Copy)]
 pub struct CfgContext {
     pub internal_timestep_seconds: usize,
     pub kernel: MuskingumCungeKernel,
     pub num_threads: usize,
+    pub streamflow_only: bool,
 }
 
 impl CfgContext {
@@ -151,6 +168,7 @@ impl CfgContext {
             internal_timestep_seconds: config.internal_timestep_seconds,
             kernel: config.kernel,
             num_threads: config.num_threads,
+            streamflow_only: config.streamflow_only,
         }
     }
     /// If the provided arguments are important/different enough, provide a suffix/infix for naming
@@ -183,6 +201,7 @@ mod tests {
         let args = Args::parse_from(["test", "test_route_dir"]);
         assert_eq!(args.route_dir, PathBuf::from("test_route_dir"));
         assert_eq!(args.internal_timestep_seconds, 300);
+        assert!(!args.streamflow_only);
         match args.kernel {
             MuskingumCungeKernel::TRouteModernized => {}
             _ => panic!("Expected default kernel to be TRouteModernized"),
@@ -198,9 +217,12 @@ mod tests {
             "600",
             "-k",
             "t-route-legacy",
+            "--streamflow_only",
+            "true",
         ]);
         assert_eq!(args.route_dir, PathBuf::from("test_route_dir"));
         assert_eq!(args.internal_timestep_seconds, 600);
+        assert!(args.streamflow_only);
         match args.kernel {
             MuskingumCungeKernel::TRouteLegacy => {}
             _ => panic!("Expected kernel to be TRouteLegacy"),
