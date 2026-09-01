@@ -59,6 +59,7 @@ unsafe extern "C" {
     pub fn c_binding_c_mc_muskingum_cunge(
         input: *const MuskingumCungeInput,
         result: *mut MuskingumCungeResult,
+        calculate_courant: bool,
     );
 }
 
@@ -76,8 +77,8 @@ pub fn submuskingcunge(
     tw: f32,                  // top width before bankfull (meters)
     tw_cc: f32,               // top width of compound (meters)
     n_cc: f32,                // mannings of compound
-    depth_p: f32,             // depth of flow in channel
-    _calculate_courant: bool, // whether to calculate courant number
+    depth_p: f32,            // depth of flow in channel
+    calculate_courant: bool, // whether to calculate courant number
 ) -> MuskingumCungeResult {
     // double dt,
     // double qup,
@@ -113,7 +114,7 @@ pub fn submuskingcunge(
     };
     let mut result = MuskingumCungeResult::default();
     unsafe {
-        c_binding_c_mc_muskingum_cunge(&input, &mut result);
+        c_binding_c_mc_muskingum_cunge(&input, &mut result, calculate_courant);
     }
     result
 }

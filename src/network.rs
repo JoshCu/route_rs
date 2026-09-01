@@ -1,10 +1,9 @@
 use crate::config::{ChannelParams, ColumnConfig};
-use crate::state::NodeStatus;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 // Network node representing a catchment/nexus
 #[derive(Debug, Clone)]
@@ -13,7 +12,6 @@ pub struct NetworkNode {
     pub downstream_id: Option<u32>,
     pub upstream_ids: Vec<u32>,
     pub area_sqkm: Option<f32>,
-    pub status: Arc<RwLock<NodeStatus>>,
     pub qlat_file: PathBuf,
     pub inflow_storage: Arc<Mutex<VecDeque<f32>>>,
 }
@@ -30,7 +28,6 @@ impl NetworkNode {
             downstream_id,
             upstream_ids: Vec::new(),
             area_sqkm,
-            status: Arc::new(RwLock::new(NodeStatus::NotReady)),
             qlat_file,
             inflow_storage: Arc::new(Mutex::new(VecDeque::new())),
         }
@@ -41,14 +38,12 @@ impl NetworkNode {
 #[derive(Debug, Clone)]
 pub struct NetworkTopology {
     pub nodes: HashMap<u32, NetworkNode>,
-    pub routing_order: Vec<u32>,
 }
 
 impl NetworkTopology {
     pub fn new() -> Self {
         NetworkTopology {
             nodes: HashMap::new(),
-            routing_order: Vec::new(),
         }
     }
 
@@ -81,10 +76,6 @@ impl NetworkTopology {
             }
         }
     }
-
-    pub fn collect_node_ids(&mut self) {
-        self.routing_order = self.nodes.keys().copied().collect();
-    }
 }
 
 // Function to build network topology from database
@@ -96,8 +87,8 @@ pub fn build_network_topology(
     let mut topology = NetworkTopology::new();
 
     let network_query = format!(
-        "SELECT {}, {}, areasqkm FROM 'flowpaths' WHERE {} IS NOT NULL GROUP BY {}",
-        config.key, config.downstream, config.downstream, config.key
+        "SELECT {}, {}, areasqkm FROM 'flowpaths' WHERE {} IS NOT NULL",
+        config.key, config.downstream, config.downstream
     );
     let mut stmt = conn
         .prepare(&network_query)
@@ -133,9 +124,6 @@ pub fn build_network_topology(
     // Build upstream connections
     topology.build_upstream_connections();
 
-    // Collect node IDs (scheduling order is handled by the scheduler thread)
-    topology.collect_node_ids();
-
     println!("Network topology built with {} nodes", topology.nodes.len());
     println!(
         "Found {} outlet nodes",
@@ -155,17 +143,14 @@ pub fn load_channel_parameters(
     topology: &NetworkTopology,
     config: &ColumnConfig,
 ) -> Result<HashMap<u32, ChannelParams>> {
-    if topology.routing_order.is_empty() {
+    if topology.nodes.len() == 0 {
         return Ok(HashMap::new());
     }
 
     println!(
         "Loading channel parameters for {} nodes...",
-        topology.routing_order.len()
+        topology.nodes.len()
     );
-
-    // Create a HashSet for O(1) lookups
-    let needed_ids: HashSet<u32> = topology.routing_order.iter().cloned().collect();
 
     // Query all rows without WHERE clause
     let query = format!(
@@ -212,7 +197,7 @@ pub fn load_channel_parameters(
         .filter_map(|result| {
             result.ok().and_then(|(id, params)| {
                 // Only keep parameters for nodes we need
-                if needed_ids.contains(&id) {
+                if topology.nodes.contains_key(&id) {
                     Some((id, params))
                 } else {
                     None
@@ -223,7 +208,7 @@ pub fn load_channel_parameters(
 
     // Report results
     let loaded = channel_params_map.len();
-    let total = topology.routing_order.len();
+    let total = topology.nodes.len();
     println!(
         "Successfully loaded parameters for {}/{} nodes",
         loaded, total
@@ -231,8 +216,8 @@ pub fn load_channel_parameters(
 
     if loaded < total {
         let missing: Vec<_> = topology
-            .routing_order
-            .iter()
+            .nodes
+            .keys()
             .filter(|id| !channel_params_map.contains_key(id))
             .collect();
         println!(

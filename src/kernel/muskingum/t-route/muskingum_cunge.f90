@@ -7,7 +7,7 @@ contains
 
 ! velp parameter completely unused
    subroutine muskingum_cunge(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
-      n, ncc, cs, s0, depthp, qdc, velc, depthc, ck, cn, X)
+      n, ncc, cs, s0, depthp, qdc, velc, depthc, ck, cn, X, calculate_courant)
 
       !* exactly follows SUBMUSKINGCUNGE in NWM:
       !* 1) qup and quc for a reach in upstream limit take zero values all the time
@@ -24,6 +24,7 @@ contains
       real(real32), intent(in) :: depthp
       real(real32), intent(out) :: qdc, depthc
       real(real32), intent(out) :: ck, cn, X
+      logical, intent(in) :: calculate_courant
       real(real32) :: z
       real(real32) :: bfd, C1, C2, C3, C4
       real(real32) :: velc
@@ -192,7 +193,9 @@ contains
       ! *************************************************************
       ! call courant subroutine here
       ! *************************************************************
-      call courant(h, bfd, bw, twcc, ncc, s0, n, z, dx, dt, ck, cn)
+      if (calculate_courant) then
+         call courant(h, bfd, bw, twcc, ncc, s0, n, z, dx, dt, ck, cn)
+      end if
       !print*, "deep down", depthc
 
    end subroutine muskingum_cunge

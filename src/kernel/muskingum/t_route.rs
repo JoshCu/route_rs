@@ -22,6 +22,7 @@ pub mod fortran_modernized {
         pub fn c_binding_muskingum_cunge_t_route(
             input: *const MuskingumCungeInput,
             result: *mut MuskingumCungeResult,
+            calculate_courant: bool,
         );
     }
 
@@ -39,8 +40,8 @@ pub mod fortran_modernized {
         tw: f32,                  // top width before bankfull (meters)
         tw_cc: f32,               // top width of compound (meters)
         n_cc: f32,                // mannings of compound
-        depth_p: f32,             // depth of flow in channel
-        _calculate_courant: bool, // whether to calculate courant number
+        depth_p: f32,            // depth of flow in channel
+        calculate_courant: bool, // whether to calculate courant number
     ) -> MuskingumCungeResult {
         let input = MuskingumCungeInput {
             dt,
@@ -61,7 +62,7 @@ pub mod fortran_modernized {
         };
         let mut result = MuskingumCungeResult::default();
         unsafe {
-            c_binding_muskingum_cunge_t_route(&input, &mut result);
+            c_binding_muskingum_cunge_t_route(&input, &mut result, calculate_courant);
         }
         result
     }
@@ -83,6 +84,7 @@ pub mod fortran_legacy {
         pub fn c_binding_muskingum_cunge_t_route_legacy(
             input: *const MuskingumCungeInput,
             result: *mut MuskingumCungeResult,
+            calculate_courant: bool,
         );
     }
 
@@ -100,8 +102,8 @@ pub mod fortran_legacy {
         tw: f32,                  // top width before bankfull (meters)
         tw_cc: f32,               // top width of compound (meters)
         n_cc: f32,                // mannings of compound
-        depth_p: f32,             // depth of flow in channel
-        _calculate_courant: bool, // whether to calculate courant number
+        depth_p: f32,            // depth of flow in channel
+        calculate_courant: bool, // whether to calculate courant number
     ) -> MuskingumCungeResult {
         let input = MuskingumCungeInput {
             dt,
@@ -122,7 +124,7 @@ pub mod fortran_legacy {
         };
         let mut result = MuskingumCungeResult::default();
         unsafe {
-            c_binding_muskingum_cunge_t_route_legacy(&input, &mut result);
+            c_binding_muskingum_cunge_t_route_legacy(&input, &mut result, calculate_courant);
         }
         result
     }

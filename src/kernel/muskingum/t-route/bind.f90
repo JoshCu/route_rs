@@ -1,7 +1,7 @@
 ! TODO: Move shared structs to a shared mod
-subroutine c_binding_muskingum_cunge_t_route(input, result) bind(c)
+subroutine c_binding_muskingum_cunge_t_route(input, result, calculate_courant) bind(c)
 
-    use, intrinsic :: iso_c_binding, only: c_int, c_float, c_ptr, c_f_pointer, c_loc
+    use, intrinsic :: iso_c_binding, only: c_int, c_float, c_ptr, c_f_pointer, c_loc, c_bool
     use, intrinsic :: iso_fortran_env, only: real32
     use muskingum_cunge_mod, only: muskingum_cunge
     !use precis
@@ -37,16 +37,18 @@ subroutine c_binding_muskingum_cunge_t_route(input, result) bind(c)
     ! strictly typed inputs from calling code, passed by value
     type(muskingum_cunge_input_t), intent(inout) :: input
     type(muskingum_cunge_result_t), intent(inout) :: result
+    logical(c_bool), intent(in), value :: calculate_courant
 
-    ! muskingum_cunge(dt, qup, quc, qdp, ql, dx, bw, tw, twcc, n, ncc, cs, s0, depthp, qdc, depthc, ck, cn, X)
+    ! muskingum_cunge(dt, qup, quc, qdp, ql, dx, bw, tw, twcc, n, ncc, cs, s0, depthp, qdc, depthc, ck, cn, X, calculate_courant)
     call muskingum_cunge(input%dt, input%qup, input%quc, input%qdp, input%ql,input%dx, input%bw,&
                         input%tw, input%tw_cc, input%n, input%n_cc, input%cs,input%s0,input%depthp,&
-                        result%qdc, result%velc, result%depthc, result%ck, result%cn, result%X)
+                        result%qdc, result%velc, result%depthc, result%ck, result%cn, result%X,&
+                        logical(calculate_courant))
 end subroutine
 
-subroutine c_binding_muskingum_cunge_t_route_legacy(input, result) bind(c)
+subroutine c_binding_muskingum_cunge_t_route_legacy(input, result, calculate_courant) bind(c)
 
-    use, intrinsic :: iso_c_binding, only: c_int, c_float, c_ptr, c_f_pointer, c_loc
+    use, intrinsic :: iso_c_binding, only: c_int, c_float, c_ptr, c_f_pointer, c_loc, c_bool
     use, intrinsic :: iso_fortran_env, only: real32
     use muskingcunge_module, only: muskingcungenwm
     use precis
@@ -82,10 +84,12 @@ subroutine c_binding_muskingum_cunge_t_route_legacy(input, result) bind(c)
 
     type(muskingum_cunge_input_t), intent(inout) :: input
     type(muskingum_cunge_result_t), intent(inout) :: result
+    logical(c_bool), intent(in), value :: calculate_courant
 
-    !muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,n, ncc, cs, s0, velp, depthp, qdc, velc, depthc, ck, cn, X)
+    !muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,n, ncc, cs, s0, velp, depthp, qdc, velc, depthc, ck, cn, X, calculate_courant)
     call muskingcungenwm(input%dt, input%qup, input%quc, input%qdp, input%ql, input%dx,&
         input%bw, input%tw, input%tw_cc, input%n, input%n_cc, input%cs, input%s0, input%velp, input%depthp,&
-        result%qdc, result%velc, result%depthc, result%ck, result%cn, result%X)
+        result%qdc, result%velc, result%depthc, result%ck, result%cn, result%X,&
+        logical(calculate_courant))
 
 end subroutine

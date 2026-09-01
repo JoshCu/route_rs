@@ -10,7 +10,6 @@ mod io;
 
 mod network;
 mod routing;
-mod state;
 pub mod kernel {
     pub mod muskingum;
 }
@@ -34,7 +33,6 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
     let dt: f32 = config.internal_timestep_seconds as f32;
     let db_path: std::path::PathBuf = config.gpkg_file;
     let csv_dir: std::path::PathBuf = config.csv_dir;
-    let _config_dir: std::path::PathBuf = config.config_dir;
     // let output_format: OutputFormat = OutputFormat::NetCdf;
     let output_format: OutputFormat = match OUTPUT_TYPE {
         "CSV" => OutputFormat::Csv,
@@ -81,7 +79,7 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
         "  Internal timestep: {} seconds",
         config.internal_timestep_seconds
     );
-    println!("  Network nodes: {}", topology.routing_order.len());
+    println!("  Network nodes: {}", topology.nodes.len());
     println!("  Total timesteps: {}", total_timesteps);
 
     // Initialize NetCDF output
@@ -94,13 +92,13 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
     let netcdf_writer = init_netcdf_output(
         config.output_dir,
         &nc_filename,
-        topology.routing_order.len(),
+        topology.nodes.len(),
         timesteps,
         &reference_time,
     )?;
 
     // Create progress bar
-    let pb = ProgressBar::new(topology.routing_order.len() as u64);
+    let pb = ProgressBar::new(topology.nodes.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} nodes ({eta})")?
@@ -192,7 +190,6 @@ mod tests {
 
     fn setup_test_config() -> cli::Config {
         cli::Config {
-            config_dir: std::path::PathBuf::from("./tests/one_cat/config"),
             csv_dir: std::path::PathBuf::from("./tests/one_cat/outputs/ngen"),
             gpkg_file: std::path::PathBuf::from("./tests/one_cat/config/cat-486888_subset.gpkg"),
             internal_timestep_seconds: 300,
@@ -491,7 +488,6 @@ mod tests {
     fn test_run_invalid_config() {
         // Test that run_routing returns an error when given an invalid configuration (e.g. non-existent database file)
         let invalid_config = cli::Config {
-            config_dir: std::path::PathBuf::from("./tests/invalid_test/config"),
             csv_dir: std::path::PathBuf::from("./tests/invalid_test/outputs/ngen"),
             gpkg_file: std::path::PathBuf::from(
                 "./tests/invalid_test/config/cat-486888_subset.gpkg",

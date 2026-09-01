@@ -43,7 +43,6 @@ pub fn print_banner(config: &Config) {
     eprintln!();
 }
 pub struct Config {
-    pub config_dir: PathBuf,
     pub csv_dir: PathBuf,
     pub gpkg_file: PathBuf,
     pub internal_timestep_seconds: usize,
@@ -107,7 +106,6 @@ pub fn get_args() -> Result<Config> {
             .path()
     };
     let cfg = Config {
-        config_dir,
         csv_dir,
         gpkg_file,
         internal_timestep_seconds: args.internal_timestep_seconds,

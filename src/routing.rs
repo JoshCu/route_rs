@@ -4,13 +4,11 @@ use crate::io::netcdf::write_batch;
 use crate::io::results::SimulationResults;
 use crate::kernel::muskingum::{MuskingumCungeInput, MuskingumCungeKernel, MuskingumCungeResult};
 use crate::network::NetworkTopology;
-use crate::state::NodeStatus;
 use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use netcdf::FileMut;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -214,7 +212,6 @@ fn scheduler_thread(
     scheduler_rx: Receiver<SchedulerMessage>,
     worker_tx: Vec<Sender<WorkerMessage>>,
     total_nodes: usize,
-    _completed_count: Arc<AtomicUsize>,
 ) -> Result<()> {
     // Track which nodes are ready to process
     let mut ready_nodes = VecDeque::new();
@@ -357,12 +354,6 @@ fn worker_thread(
                                     }
                                 }
 
-                                // Update status
-                                let mut status = node.status.write().map_err(|e| {
-                                    anyhow::anyhow!("Failed to acquire status write lock: {}", e)
-                                })?;
-                                *status = NodeStatus::Ready;
-
                                 // Free inflow storage memory
                                 let mut old_inflow = node.inflow_storage.lock().map_err(|e| {
                                     anyhow::anyhow!("Failed to lock inflow storage: {}", e)
@@ -422,7 +413,6 @@ pub fn process_routing_parallel(
     num_threads: usize,
 ) -> Result<()> {
     let total_nodes = topology.nodes.len();
-    let completed_count = Arc::new(AtomicUsize::new(0));
     let topology_arc = topology;
     let channel_params_arc = channel_params_map;
 
@@ -479,9 +469,8 @@ pub fn process_routing_parallel(
 
     // Spawn scheduler thread
     let topo = Arc::clone(&topology_arc);
-    let completed = Arc::clone(&completed_count);
     let scheduler_handle = thread::spawn(move || {
-        if let Err(e) = scheduler_thread(topo, scheduler_rx, worker_txs, total_nodes, completed) {
+        if let Err(e) = scheduler_thread(topo, scheduler_rx, worker_txs, total_nodes) {
             eprintln!("Scheduler thread error: {}", e);
         }
     });

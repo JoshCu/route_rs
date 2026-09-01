@@ -1,5 +1,6 @@
 #include <math.h>
 #include <float.h>
+#include <stdbool.h>
 #include "muskingumcunge.h"
 
 
@@ -151,7 +152,8 @@ void compute_celerity(
 
 void c_binding_c_mc_muskingum_cunge(
     MC_input *input,
-    QVD_float *rv
+    QVD_float *rv,
+    bool calculate_courant
 ) {
 
     // BA: added to convert from struct to individual vars
@@ -307,9 +309,14 @@ void c_binding_c_mc_muskingum_cunge(
         rv->velc = (1.0/n) * (pow(R, TWOTHIRDS)) * chan_struct.sqrt_s0;
         rv->depthc = qc_right->h;
 
-        compute_celerity(chan, hg, qc_right);
-        rv->ck = qc_right->ck;
-        rv->cn = qc_right->ck * (dt / dx);
+        if (calculate_courant) {
+            compute_celerity(chan, hg, qc_right);
+            rv->ck = qc_right->ck;
+            rv->cn = qc_right->ck * (dt / dx);
+        } else {
+            rv->ck = 0.0;
+            rv->cn = 0.0;
+        }
         rv->X = 0.0;
     } else {
         rv->qdc = 0.0;

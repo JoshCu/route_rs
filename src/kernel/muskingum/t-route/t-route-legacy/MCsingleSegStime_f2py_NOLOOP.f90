@@ -6,7 +6,7 @@ module muskingcunge_module
 contains
 
 subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
-    n, ncc, cs, s0, velp, depthp, qdc, velc, depthc, ck, cn, X)
+    n, ncc, cs, s0, velp, depthp, qdc, velc, depthc, ck, cn, X, calculate_courant)
 
     !* exactly follows SUBMUSKINGCUNGE in NWM:
     !* 1) qup and quc for a reach in upstream limit take zero values all the time
@@ -23,6 +23,7 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
     real(prec), intent(in) :: depthp
     real(prec), intent(out) :: qdc, velc, depthc
     real(prec), intent(out) :: ck, cn, X
+    logical, intent(in) :: calculate_courant
     real(prec) :: z
     real(prec) :: bfd, C1, C2, C3, C4
 
@@ -180,7 +181,9 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
     ! *************************************************************
     ! call courant subroutine here
     ! *************************************************************
-    call courant(h, bfd, bw, twcc, ncc, s0, n, z, dx, dt, ck, cn)
+    if (calculate_courant) then
+        call courant(h, bfd, bw, twcc, ncc, s0, n, z, dx, dt, ck, cn)
+    end if
     !print*, "deep down", depthc
 
 end subroutine muskingcungenwm
