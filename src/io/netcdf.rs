@@ -125,11 +125,6 @@ pub fn write_batch(
     let mut all_velocities = Vec::new();
     let mut all_depths = Vec::new();
 
-    let expected_timesteps = file
-        .dimension("time")
-        .ok_or_else(|| anyhow::anyhow!("time dimension not found"))?
-        .len();
-
     for results in batch {
         all_feature_ids.push(results.feature_id);
         all_flows.extend_from_slice(&results.flow_data);
@@ -145,43 +140,30 @@ pub fn write_batch(
         .put_values(&all_feature_ids, start_idx..)
         .context("Failed to write feature_ids")?;
 
-    // Reshape and write flow data
-    let flow_2d: Vec<Vec<f32>> = all_flows
-        .chunks(expected_timesteps)
-        .map(|chunk| chunk.to_vec())
-        .collect();
+    let end_idx = start_idx + all_feature_ids.len();
 
+    // flow/velocity/depth are already flat in row-major (feature, time) order,
+    // matching the variable layout, so each can be written in a single call.
     let mut flow_var = file
         .variable_mut("flow")
         .ok_or_else(|| anyhow::anyhow!("flow variable not found"))?;
-    for (i, row) in flow_2d.iter().enumerate() {
-        flow_var.put_values(row, (start_idx + i, ..))?;
-    }
-
-    // Similar for velocity and depth
-    let velocity_2d: Vec<Vec<f32>> = all_velocities
-        .chunks(expected_timesteps)
-        .map(|chunk| chunk.to_vec())
-        .collect();
+    flow_var
+        .put_values(&all_flows, (start_idx..end_idx, ..))
+        .context("Failed to write flow data")?;
 
     let mut velocity_var = file
         .variable_mut("velocity")
         .ok_or_else(|| anyhow::anyhow!("velocity variable not found"))?;
-    for (i, row) in velocity_2d.iter().enumerate() {
-        velocity_var.put_values(row, (start_idx + i, ..))?;
-    }
-
-    let depth_2d: Vec<Vec<f32>> = all_depths
-        .chunks(expected_timesteps)
-        .map(|chunk| chunk.to_vec())
-        .collect();
+    velocity_var
+        .put_values(&all_velocities, (start_idx..end_idx, ..))
+        .context("Failed to write velocity data")?;
 
     let mut depth_var = file
         .variable_mut("depth")
         .ok_or_else(|| anyhow::anyhow!("depth variable not found"))?;
-    for (i, row) in depth_2d.iter().enumerate() {
-        depth_var.put_values(row, (start_idx + i, ..))?;
-    }
+    depth_var
+        .put_values(&all_depths, (start_idx..end_idx, ..))
+        .context("Failed to write depth data")?;
 
     Ok(())
 }
