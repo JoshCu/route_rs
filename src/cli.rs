@@ -30,12 +30,20 @@ struct Args {
     kernel: MuskingumCungeKernel,
     #[arg(short, long, default_value_t = num_cpus::get())]
     num_threads: usize,
+    /// Assume upstream inflow for the current timestep equals the previous timestep's,
+    /// allowing the whole network to be routed one timestep at a time instead of in
+    /// strict upstream-to-downstream dependency order.
+    #[arg(long, default_value_t = false)]
+    assume_short_timestep: bool,
 }
 pub fn print_banner(config: &Config) {
     eprintln!("   {}", "🌊 Route RS".cyan().bold());
     eprintln!("  Kernel:   {}", format!("{}", config.kernel).green());
     eprintln!("  Timestep: {}s", config.internal_timestep_seconds);
     eprintln!("  Threads:  {}", config.num_threads);
+    if config.assume_short_timestep {
+        eprintln!("  {}", "Assume short timestep: enabled".yellow());
+    }
     eprintln!(
         "  GeoPackage: {}",
         config.gpkg_file.display().to_string().dimmed()
@@ -56,6 +64,7 @@ pub struct Config {
     pub output_dir: PathBuf,
     pub kernel: MuskingumCungeKernel,
     pub num_threads: usize,
+    pub assume_short_timestep: bool,
 }
 
 pub fn get_args() -> Result<Config> {
@@ -120,6 +129,7 @@ pub fn get_args() -> Result<Config> {
         output_dir,
         kernel: args.kernel,
         num_threads: args.num_threads,
+        assume_short_timestep: args.assume_short_timestep,
     };
     print_banner(&cfg);
     Ok(cfg)
@@ -143,6 +153,7 @@ pub struct CfgContext {
     pub internal_timestep_seconds: usize,
     pub kernel: MuskingumCungeKernel,
     pub num_threads: usize,
+    pub assume_short_timestep: bool,
 }
 
 impl CfgContext {
@@ -151,6 +162,7 @@ impl CfgContext {
             internal_timestep_seconds: config.internal_timestep_seconds,
             kernel: config.kernel,
             num_threads: config.num_threads,
+            assume_short_timestep: config.assume_short_timestep,
         }
     }
     /// If the provided arguments are important/different enough, provide a suffix/infix for naming
@@ -164,6 +176,9 @@ impl CfgContext {
         //     MuskingumCungeKernel::TRouteModernized => {}
         //     _ => parts.push(format!("kernel-{}", self.kernel)),
         // }
+        if self.assume_short_timestep {
+            parts.push("assume-short-ts".to_string());
+        }
         if parts.is_empty() {
             None
         } else {

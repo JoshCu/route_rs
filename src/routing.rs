@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 // Message types
-enum WriterMessage {
+pub(crate) enum WriterMessage {
     WriteResults(Arc<SimulationResults>),
     Shutdown,
 }
@@ -163,7 +163,7 @@ fn process_node_all_timesteps(
     Ok(results)
 }
 
-fn writer_thread(
+pub(crate) fn writer_thread(
     receiver: Receiver<WriterMessage>,
     output_file: Arc<Mutex<FileMut>>,
     batch_size: usize, // e.g., 100 nodes
@@ -284,7 +284,7 @@ fn scheduler_thread(
 }
 
 // Downsample full-resolution results to output frequency
-fn downsample_results(results: SimulationResults, downsampling: usize) -> SimulationResults {
+pub(crate) fn downsample_results(results: SimulationResults, downsampling: usize) -> SimulationResults {
     if downsampling <= 1 {
         return results;
     }

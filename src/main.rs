@@ -10,6 +10,7 @@ mod io;
 
 mod network;
 mod routing;
+mod routing_short_ts;
 mod state;
 pub mod kernel {
     pub mod muskingum;
@@ -108,29 +109,55 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
         &reference_time,
     )?;
 
-    // Create progress bar
-    let pb = ProgressBar::new(topology.routing_order.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} nodes ({eta})")?
-            .progress_chars("#>-")
-    );
+    // Create progress bar. The wavefront engine finishes one node at a time, so it's
+    // sized by node count; the short-timestep engine advances the whole network
+    // together, so it's sized by timestep count instead.
+    let pb = if config_args.assume_short_timestep {
+        let bar = ProgressBar::new(total_timesteps as u64);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} timesteps ({eta})")?
+                .progress_chars("#>-")
+        );
+        bar
+    } else {
+        let bar = ProgressBar::new(topology.routing_order.len() as u64);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} nodes ({eta})")?
+                .progress_chars("#>-")
+        );
+        bar
+    };
     if quiet {
         pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
     }
 
-    // Run parallel routing
-    println!("\nStarting parallel wave-front routing...");
-    process_routing_parallel(
-        Arc::new(topology),
-        Arc::new(channel_params_map),
-        total_timesteps,
-        dt,
-        downsampling,
-        netcdf_writer,
-        Arc::new(pb),
-        &config_args,
-    )?;
+    if config_args.assume_short_timestep {
+        println!("\nStarting short-timestep routing (assuming upstream inflow equals previous timestep)...");
+        routing_short_ts::process_routing_short_timestep(
+            Arc::new(topology),
+            Arc::new(channel_params_map),
+            total_timesteps,
+            dt,
+            downsampling,
+            netcdf_writer,
+            Arc::new(pb),
+            &config_args,
+        )?;
+    } else {
+        println!("\nStarting parallel wave-front routing...");
+        process_routing_parallel(
+            Arc::new(topology),
+            Arc::new(channel_params_map),
+            total_timesteps,
+            dt,
+            downsampling,
+            netcdf_writer,
+            Arc::new(pb),
+            &config_args,
+        )?;
+    }
 
     // Final flush for CSV
     if let Some(mut wtr) = csv_writer {
@@ -207,6 +234,7 @@ mod tests {
             output_dir: std::path::PathBuf::from("./tests/one_cat/outputs/troute"),
             kernel: muskingum::MuskingumCungeKernel::TRouteModernized,
             num_threads: 1,
+            assume_short_timestep: false,
         }
     }
 
@@ -243,6 +271,7 @@ mod tests {
             internal_timestep_seconds: config.internal_timestep_seconds,
             kernel: config.kernel,
             num_threads: config.num_threads,
+            assume_short_timestep: config.assume_short_timestep,
         };
         let conn: rusqlite::Connection = rusqlite::Connection::open(&config.gpkg_file).unwrap();
         let column_config: ColumnConfig = ColumnConfig::new();
@@ -323,6 +352,22 @@ mod tests {
         std::fs::create_dir_all(&tmp_dir).unwrap();
         let config = cli::Config {
             output_dir: tmp_dir.clone(),
+            ..setup_test_config()
+        };
+        let result = run_routing(config, true);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        assert!(result.is_ok());
+    }
+
+    // Same end-to-end smoke test as test_run_routing, but exercising the
+    // assume_short_timestep engine (routing_short_ts.rs) instead of the wavefront one.
+    #[test]
+    fn test_run_routing_assume_short_timestep() {
+        let tmp_dir = std::env::temp_dir().join("rs_route_test_run_routing_short_ts");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let config = cli::Config {
+            output_dir: tmp_dir.clone(),
+            assume_short_timestep: true,
             ..setup_test_config()
         };
         let result = run_routing(config, true);
@@ -526,6 +571,7 @@ mod tests {
             output_dir: std::path::PathBuf::from("./tests/invalid_test/outputs/troute"),
             kernel: muskingum::MuskingumCungeKernel::TRouteModernized,
             num_threads: 1,
+            assume_short_timestep: false,
         };
         let result = run_routing(invalid_config, true);
         assert!(result.is_err());
