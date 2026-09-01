@@ -32,7 +32,7 @@ pub fn init_netcdf_output(
         .with_context(|| format!("Failed to create NetCDF file: {}", filename))?;
 
     // Add dimensions
-    file.add_dimension("feature_id", 0)
+    file.add_dimension("feature_id", _num_flowpaths)
         .context("Failed to add feature_id dimension")?;
     file.add_dimension("time", timesteps.len())
         .context("Failed to add time dimension")?;
@@ -108,16 +108,13 @@ pub fn init_netcdf_output(
 pub fn write_batch(
     output_file: &Arc<Mutex<FileMut>>,
     batch: &[Arc<SimulationResults>],
+    batch_num: usize,
 ) -> Result<()> {
     let mut file = output_file
         .lock()
         .map_err(|e| anyhow::anyhow!("Failed to acquire NetCDF file lock: {}", e))?;
 
-    // Get current index once
-    let feature_var = file
-        .variable("feature_id")
-        .ok_or_else(|| anyhow::anyhow!("feature_id variable not found"))?;
-    let start_idx = feature_var.len();
+    let start_idx = batch_num * batch.len();
 
     // Prepare all data arrays (already downsampled by workers)
     let mut all_feature_ids = Vec::with_capacity(batch.len());

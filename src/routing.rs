@@ -167,6 +167,7 @@ fn writer_thread(
     batch_size: usize, // e.g., 100 nodes
 ) -> Result<()> {
     let mut batch = Vec::new();
+    let mut batch_num = 0;
 
     loop {
         match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -175,28 +176,30 @@ fn writer_thread(
 
                 // Write when batch is full
                 if batch.len() >= batch_size {
-                    write_batch(&output_file, &batch)?;
+                    write_batch(&output_file, &batch, batch_num)?;
                     batch.clear();
+                    batch_num += 1;
                 }
             }
             Ok(WriterMessage::Shutdown) => {
                 // Write remaining batch
                 if !batch.is_empty() {
-                    write_batch(&output_file, &batch)?;
+                    write_batch(&output_file, &batch, batch_num)?;
                 }
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Write partial batch on timeout to avoid holding data too long
                 if !batch.is_empty() {
-                    write_batch(&output_file, &batch)?;
+                    write_batch(&output_file, &batch, batch_num)?;
                     batch.clear();
+                    batch_num += 1;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 // All senders dropped — normal shutdown
                 if !batch.is_empty() {
-                    write_batch(&output_file, &batch)?;
+                    write_batch(&output_file, &batch, batch_num)?;
                 }
                 break;
             }
