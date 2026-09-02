@@ -24,6 +24,11 @@ pub fn muskingum_cunge(
     depth_p: f32,            // depth of flow in channel
     calculate_courant: bool, // whether to calculate courant number
 ) -> MuskingumCungeResult {
+    // early exit if no flow
+    if qdp <= 0.0 && ql <= 0.0 && qup <= 0.0 && quc <= 0.0 {
+        return MuskingumCungeResult::default();
+    }
+
     // Precompute constants
     let z = if cs == 0.0 { 1.0 } else { 1.0 / cs };
     let sqrt_1_z2 = (1.0 + z * z).sqrt();
@@ -45,10 +50,6 @@ pub fn muskingum_cunge(
     }
 
     let mut depthc = depth_p.max(0.0);
-
-    if ql <= 0.0 && qup <= 0.0 && quc <= 0.0 && qdp <= 0.0 {
-        return MuskingumCungeResult::default();
-    }
 
     let mut h = (depthc * 1.33) + 0.01;
     let mut h_0 = depthc * 0.67;

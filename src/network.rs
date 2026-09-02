@@ -5,6 +5,7 @@ use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 // Network node representing a catchment/nexus
 #[derive(Debug, Clone)]
@@ -112,21 +113,12 @@ pub fn build_network_topology(
     Ok(topology)
 }
 
-// Fetch all channel parameters and filter in memory
+// Fetch all channel parameters. Does not depend on NetworkTopology, so it can
+// be run concurrently with build_network_topology against a separate connection.
 pub fn load_channel_parameters(
     conn: &Connection,
-    topology: &NetworkTopology,
     config: &ColumnConfig,
 ) -> Result<FxHashMap<u32, ChannelParams>> {
-    if topology.nodes.len() == 0 {
-        return Ok(FxHashMap::default());
-    }
-
-    println!(
-        "Loading channel parameters for {} nodes...",
-        topology.nodes.len()
-    );
-
     // Query all rows without WHERE clause
     let query = format!(
         "SELECT {0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8} \
@@ -169,26 +161,55 @@ pub fn load_channel_parameters(
                 },
             ))
         })?
-        .filter_map(|result| {
-            result.ok().and_then(|(id, params)| {
-                // Only keep parameters for nodes we need
-                if topology.nodes.contains_key(&id) {
-                    Some((id, params))
-                } else {
-                    None
-                }
-            })
-        })
+        .filter_map(|result| result.ok())
         .collect();
 
-    // Report results
+    Ok(channel_params_map)
+}
+
+// Build the network topology and load channel parameters together. Both are
+// independent full-table scans against the same read-only gpkg, so each gets
+// its own connection (rusqlite::Connection isn't Sync) and runs on its own thread.
+pub fn load_network(
+    db_path: &PathBuf,
+    config: &ColumnConfig,
+    csv_dir: &PathBuf,
+) -> Result<(NetworkTopology, FxHashMap<u32, ChannelParams>)> {
+    let topology_handle = {
+        let db_path = db_path.clone();
+        let csv_dir = csv_dir.clone();
+        let config = config.clone();
+        thread::spawn(move || -> Result<NetworkTopology> {
+            let conn = Connection::open(&db_path)
+                .with_context(|| format!("Failed to open database: {:?}", db_path))?;
+            build_network_topology(&conn, &config, &csv_dir)
+        })
+    };
+    let params_handle = {
+        let db_path = db_path.clone();
+        let config = config.clone();
+        thread::spawn(move || -> Result<FxHashMap<u32, ChannelParams>> {
+            let conn = Connection::open(&db_path)
+                .with_context(|| format!("Failed to open database: {:?}", db_path))?;
+            load_channel_parameters(&conn, &config)
+        })
+    };
+
+    let topology = topology_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Network topology thread panicked"))??;
+    let mut channel_params_map = params_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Channel parameters thread panicked"))??;
+
+    // Keep only parameters for nodes actually in the network, and report coverage
+    channel_params_map.retain(|id, _| topology.nodes.contains_key(id));
     let loaded = channel_params_map.len();
     let total = topology.nodes.len();
     println!(
         "Successfully loaded parameters for {}/{} nodes",
         loaded, total
     );
-
     if loaded < total {
         let missing: Vec<_> = topology
             .nodes
@@ -202,5 +223,5 @@ pub fn load_channel_parameters(
         );
     }
 
-    Ok(channel_params_map)
+    Ok((topology, channel_params_map))
 }
