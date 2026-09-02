@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use netcdf::FileMut;
 use std::cmp::min;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -43,7 +43,7 @@ fn process_node_all_timesteps(
         .get(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node {} not found", node_id))?;
 
-    let mut results = SimulationResults::new(node.id as i64);
+    let mut results = SimulationResults::new(node.id);
 
     let area = node
         .area_sqkm
@@ -211,12 +211,10 @@ fn scheduler_thread(
     topology: Arc<NetworkTopology>,
     scheduler_rx: Receiver<SchedulerMessage>,
     worker_tx: Vec<Sender<WorkerMessage>>,
-    total_nodes: usize,
 ) -> Result<()> {
     // Track which nodes are ready to process
     let mut ready_nodes = VecDeque::new();
-    let mut processed_nodes = HashSet::new();
-    let mut pending_downstream_count: HashMap<u32, usize> = HashMap::new();
+    let mut pending_upstreams_count: HashMap<u32, usize> = HashMap::new();
 
     // Initialize with leaf nodes (no upstream dependencies)
     for (&node_id, node) in &topology.nodes {
@@ -224,12 +222,13 @@ fn scheduler_thread(
             ready_nodes.push_back(node_id);
         } else {
             // Count how many upstream nodes need to complete
-            pending_downstream_count.insert(node_id, node.upstream_ids.len());
+            pending_upstreams_count.insert(node_id, node.upstream_ids.len());
         }
     }
 
     let num_workers = worker_tx.len();
     let mut next_worker = 0;
+    let mut pending_runs = 0;
 
     loop {
         // Send ready work to workers
@@ -239,30 +238,25 @@ fn scheduler_thread(
                 eprintln!("Failed to send work to worker {}: {}", next_worker, e);
             }
             next_worker = (next_worker + 1) % num_workers;
+            pending_runs += 1;
         }
 
         // Wait for completion messages
         match scheduler_rx.recv() {
             Ok(SchedulerMessage::NodeCompleted(node_id)) => {
-                processed_nodes.insert(node_id);
-
+                pending_runs -= 1;
                 // Check if this enables any downstream nodes
                 if let Some(node) = topology.nodes.get(&node_id) {
                     if let Some(downstream_id) = node.downstream_id {
-                        if let Some(count) = pending_downstream_count.get_mut(&downstream_id) {
+                        if let Some(count) = pending_upstreams_count.get_mut(&downstream_id) {
                             *count = count.saturating_sub(1);
                             if *count == 0 {
                                 // Prioritize downstream nodes to free inflow buffers sooner
                                 ready_nodes.push_front(downstream_id);
-                                pending_downstream_count.remove(&downstream_id);
+                                pending_upstreams_count.remove(&downstream_id);
                             }
                         }
                     }
-                }
-
-                // Check if we're done
-                if processed_nodes.len() >= total_nodes {
-                    break;
                 }
             }
             Ok(SchedulerMessage::Shutdown) => break,
@@ -270,6 +264,9 @@ fn scheduler_thread(
                 eprintln!("Scheduler channel error: {}", e);
                 break;
             }
+        }
+        if pending_runs == 0 && ready_nodes.is_empty() {
+            break;
         }
     }
 
@@ -470,7 +467,7 @@ pub fn process_routing_parallel(
     // Spawn scheduler thread
     let topo = Arc::clone(&topology_arc);
     let scheduler_handle = thread::spawn(move || {
-        if let Err(e) = scheduler_thread(topo, scheduler_rx, worker_txs, total_nodes) {
+        if let Err(e) = scheduler_thread(topo, scheduler_rx, worker_txs) {
             eprintln!("Scheduler thread error: {}", e);
         }
     });

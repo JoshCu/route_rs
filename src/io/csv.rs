@@ -26,14 +26,13 @@ pub fn load_external_flows(
 
     let file = File::open(&csv_file)
         .with_context(|| format!("Failed to open CSV file: {}", csv_file.display()))?;
-    let buffered_reader = BufReader::new(file);
 
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
         .delimiter(b',')
         .flexible(true)
         .trim(csv::Trim::All)
-        .from_reader(buffered_reader);
+        .from_reader(file);
 
     let qlat_index = match var_name {
         Some(var_name) => {
