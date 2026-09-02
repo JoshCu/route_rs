@@ -1,7 +1,8 @@
 use crate::config::{ChannelParams, ColumnConfig};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::collections::{HashMap, VecDeque};
+use rustc_hash::FxHashMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -9,24 +10,17 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone)]
 pub struct NetworkNode {
     pub id: u32,
-    pub downstream_id: Option<u32>,
-    pub upstream_ids: Vec<u32>,
+    pub downstream_id: u32,
     pub area_sqkm: Option<f32>,
     pub qlat_file: PathBuf,
     pub inflow_storage: Arc<Mutex<VecDeque<f32>>>,
 }
 
 impl NetworkNode {
-    pub fn new(
-        id: u32,
-        downstream_id: Option<u32>,
-        area_sqkm: Option<f32>,
-        qlat_file: PathBuf,
-    ) -> Self {
+    pub fn new(id: u32, downstream_id: u32, area_sqkm: Option<f32>, qlat_file: PathBuf) -> Self {
         NetworkNode {
             id,
             downstream_id,
-            upstream_ids: Vec::new(),
             area_sqkm,
             qlat_file,
             inflow_storage: Arc::new(Mutex::new(VecDeque::new())),
@@ -37,20 +31,22 @@ impl NetworkNode {
 // Network topology
 #[derive(Debug, Clone)]
 pub struct NetworkTopology {
-    pub nodes: HashMap<u32, NetworkNode>,
+    pub nodes: FxHashMap<u32, NetworkNode>,
+    pub upstream_counts: FxHashMap<u32, usize>,
 }
 
 impl NetworkTopology {
     pub fn new() -> Self {
         NetworkTopology {
-            nodes: HashMap::new(),
+            nodes: FxHashMap::default(),
+            upstream_counts: FxHashMap::default(),
         }
     }
 
     pub fn add_node(
         &mut self,
         id: u32,
-        downstream_id: Option<u32>,
+        downstream_id: u32,
         area_sqkm: Option<f32>,
         qlat_file: PathBuf,
     ) {
@@ -59,21 +55,8 @@ impl NetworkTopology {
     }
 
     pub fn build_upstream_connections(&mut self) {
-        let mut upstream_map: HashMap<u32, Vec<u32>> = HashMap::new();
-
-        for (id, node) in &self.nodes {
-            if let Some(downstream) = &node.downstream_id {
-                upstream_map
-                    .entry(*downstream)
-                    .or_insert_with(Vec::new)
-                    .push(*id);
-            }
-        }
-
-        for (id, upstreams) in upstream_map {
-            if let Some(node) = self.nodes.get_mut(&id) {
-                node.upstream_ids = upstreams;
-            }
+        for node in self.nodes.values() {
+            *self.upstream_counts.entry(node.downstream_id).or_insert(0) += 1;
         }
     }
 }
@@ -118,21 +101,13 @@ pub fn build_network_topology(
             .ok_or_else(|| anyhow::anyhow!("Invalid toID format: {}", downstream_id))?;
 
         let qlat_file_path = csv_dir.join(format!("cat-{}.csv", n_id));
-        topology.add_node(n_id, Some(n_downstream_id), Some(area_sqkm), qlat_file_path);
+        topology.add_node(n_id, n_downstream_id, Some(area_sqkm), qlat_file_path);
     }
 
     // Build upstream connections
     topology.build_upstream_connections();
 
     println!("Network topology built with {} nodes", topology.nodes.len());
-    println!(
-        "Found {} outlet nodes",
-        topology
-            .nodes
-            .values()
-            .filter(|n| n.downstream_id.is_none())
-            .count()
-    );
 
     Ok(topology)
 }
@@ -142,9 +117,9 @@ pub fn load_channel_parameters(
     conn: &Connection,
     topology: &NetworkTopology,
     config: &ColumnConfig,
-) -> Result<HashMap<u32, ChannelParams>> {
+) -> Result<FxHashMap<u32, ChannelParams>> {
     if topology.nodes.len() == 0 {
-        return Ok(HashMap::new());
+        return Ok(FxHashMap::default());
     }
 
     println!(
@@ -172,7 +147,7 @@ pub fn load_channel_parameters(
         .context("Failed to prepare channel params query")?;
 
     // Execute query and filter results in memory
-    let channel_params_map: HashMap<u32, ChannelParams> = stmt
+    let channel_params_map: FxHashMap<u32, ChannelParams> = stmt
         .query_map([], |row| {
             let wb_id: String = row.get(0)?;
             let id = wb_id

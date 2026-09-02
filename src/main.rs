@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDateTime};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 mod cli;
@@ -137,7 +137,7 @@ fn run_routing(config: cli::Config, quiet: bool) -> Result<()> {
 
 fn get_simulation_params(
     csv_dir: &std::path::PathBuf,
-    features: &HashMap<u32, ChannelParams>,
+    features: &FxHashMap<u32, ChannelParams>,
 ) -> Result<(usize, NaiveDateTime)> {
     let first_id = features
         .keys()
@@ -209,7 +209,7 @@ mod tests {
         let column_config: ColumnConfig = ColumnConfig::new();
         let topology: network::NetworkTopology =
             build_network_topology(&conn, &column_config, &config.csv_dir).unwrap();
-        let channel_params_map: HashMap<u32, ChannelParams> =
+        let channel_params_map: FxHashMap<u32, ChannelParams> =
             network::load_channel_parameters(&conn, &topology, &column_config).unwrap();
 
         let (max_external_steps, reference_time) =
@@ -230,7 +230,7 @@ mod tests {
         let column_config: ColumnConfig = ColumnConfig::new();
         let topology: network::NetworkTopology =
             build_network_topology(&conn, &column_config, &config.csv_dir).unwrap();
-        let channel_params_map: HashMap<u32, ChannelParams> =
+        let channel_params_map: FxHashMap<u32, ChannelParams> =
             network::load_channel_parameters(&conn, &topology, &column_config).unwrap();
 
         // Test with non-existent file
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn test_empty_features() {
         // Test that get_simulation_params returns an error when the features map is empty
-        let empty_features: HashMap<u32, ChannelParams> = HashMap::new();
+        let empty_features: FxHashMap<u32, ChannelParams> = FxHashMap::default();
         let result = get_simulation_params(
             &std::path::PathBuf::from("./tests/one_cat/outputs/ngen"),
             &empty_features,
@@ -270,7 +270,7 @@ mod tests {
     fn test_invalid_feature() {
         // Test that get_simulation_params returns an error when the first feature ID does not correspond to a valid CSV file
         let config: cli::Config = setup_test_config();
-        let mut invalid_features: HashMap<u32, ChannelParams> = HashMap::new();
+        let mut invalid_features: FxHashMap<u32, ChannelParams> = FxHashMap::default();
         invalid_features.insert(
             999999,
             ChannelParams {

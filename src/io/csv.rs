@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use csv::{ReaderBuilder, Writer, WriterBuilder};
+use csv::{ReaderBuilder, StringRecord, Writer, WriterBuilder};
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 // Function to load external flows for a specific nexus/catchment
@@ -14,25 +14,29 @@ pub fn load_external_flows(
 ) -> Result<VecDeque<f32>> {
     let mut external_flows = Vec::new();
 
-    // Check if file exists, if not return empty flows
-    if !csv_file.exists() {
-        println!(
-            "No external flow file found for {}: {}",
-            id,
-            csv_file.display()
-        );
-        return Ok(VecDeque::from(external_flows));
-    }
-
-    let file = File::open(&csv_file)
-        .with_context(|| format!("Failed to open CSV file: {}", csv_file.display()))?;
-
-    let mut rdr = ReaderBuilder::new()
+    let mut rdr = match ReaderBuilder::new()
         .has_headers(true)
         .delimiter(b',')
         .flexible(true)
         .trim(csv::Trim::All)
-        .from_reader(file);
+        .from_path(&csv_file)
+    {
+        Ok(rdr) => rdr,
+        Err(err) => {
+            if let csv::ErrorKind::Io(io_err) = err.kind() {
+                if io_err.kind() == ErrorKind::NotFound {
+                    println!(
+                        "No external flow file found for {}: {}",
+                        id,
+                        csv_file.display()
+                    );
+                    return Ok(VecDeque::from(external_flows));
+                }
+            }
+            return Err(err)
+                .with_context(|| format!("Failed to open CSV file: {}", csv_file.display()));
+        }
+    };
 
     let qlat_index = match var_name {
         Some(var_name) => {
@@ -42,11 +46,12 @@ pub fn load_external_flows(
         None => 2,
     };
 
-    for (i, result) in rdr.records().enumerate() {
-        let record = result.with_context(|| {
-            format!("Failed to read record {} in file {}", i, csv_file.display())
-        })?;
-
+    let mut record = StringRecord::new();
+    let mut i = 0;
+    while rdr
+        .read_record(&mut record)
+        .with_context(|| format!("Failed to read record {} in file {}", i, csv_file.display()))?
+    {
         let ql_str = record
             .get(qlat_index)
             .ok_or_else(|| anyhow::anyhow!("Missing column {} in record {}", qlat_index, i))?;
@@ -59,6 +64,7 @@ pub fn load_external_flows(
         // https://github.com/CIROH-UA/ngen/blob/ed2a903730467fa631716c033b757c3dff5fa2bb/include/core/Layer.hpp#L142
         let adjusted_flow = (ql * (area * 1_000_000.0)) / 3600.0;
         external_flows.push(adjusted_flow);
+        i += 1;
     }
 
     Ok(VecDeque::from(external_flows))

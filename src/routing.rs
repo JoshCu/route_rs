@@ -7,8 +7,9 @@ use crate::network::NetworkTopology;
 use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use netcdf::FileMut;
+use rustc_hash::FxHashMap;
 use std::cmp::min;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -214,15 +215,16 @@ fn scheduler_thread(
 ) -> Result<()> {
     // Track which nodes are ready to process
     let mut ready_nodes = VecDeque::new();
-    let mut pending_upstreams_count: HashMap<u32, usize> = HashMap::new();
+    let mut pending_upstreams_count: FxHashMap<u32, usize> = FxHashMap::default();
 
     // Initialize with leaf nodes (no upstream dependencies)
-    for (&node_id, node) in &topology.nodes {
-        if node.upstream_ids.is_empty() {
-            ready_nodes.push_back(node_id);
+    for node_id in topology.nodes.keys() {
+        let upstream_count = topology.upstream_counts.get(node_id).copied().unwrap_or(0);
+        if upstream_count == 0 {
+            ready_nodes.push_back(*node_id);
         } else {
             // Count how many upstream nodes need to complete
-            pending_upstreams_count.insert(node_id, node.upstream_ids.len());
+            pending_upstreams_count.insert(*node_id, upstream_count);
         }
     }
 
@@ -247,14 +249,12 @@ fn scheduler_thread(
                 pending_runs -= 1;
                 // Check if this enables any downstream nodes
                 if let Some(node) = topology.nodes.get(&node_id) {
-                    if let Some(downstream_id) = node.downstream_id {
-                        if let Some(count) = pending_upstreams_count.get_mut(&downstream_id) {
-                            *count = count.saturating_sub(1);
-                            if *count == 0 {
-                                // Prioritize downstream nodes to free inflow buffers sooner
-                                ready_nodes.push_front(downstream_id);
-                                pending_upstreams_count.remove(&downstream_id);
-                            }
+                    if let Some(count) = pending_upstreams_count.get_mut(&node.downstream_id) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            // Prioritize downstream nodes to free inflow buffers sooner
+                            ready_nodes.push_front(node.downstream_id);
+                            pending_upstreams_count.remove(&node.downstream_id);
                         }
                     }
                 }
@@ -306,7 +306,7 @@ fn worker_thread(
     work_rx: Receiver<WorkerMessage>,
     scheduler_tx: Sender<SchedulerMessage>,
     topology: Arc<NetworkTopology>,
-    channel_params_map: Arc<HashMap<u32, ChannelParams>>,
+    channel_params_map: Arc<FxHashMap<u32, ChannelParams>>,
     max_timesteps: usize,
     dt: f32,
     downsampling: usize,
@@ -329,24 +329,22 @@ fn worker_thread(
                         Ok(results) => {
                             // Pass full-resolution flow to downstream node
                             if let Some(node) = topology.nodes.get(&node_id) {
-                                if let Some(downstream_id) = node.downstream_id {
-                                    if let Some(downstream_node) =
-                                        topology.nodes.get(&downstream_id)
-                                    {
-                                        let mut buffer =
-                                            downstream_node.inflow_storage.lock().map_err(|e| {
-                                                anyhow::anyhow!(
-                                                    "Failed to lock downstream buffer: {}",
-                                                    e
-                                                )
-                                            })?;
-                                        if buffer.is_empty() {
-                                            buffer.resize(results.flow_data.len(), 0.0);
-                                        }
-                                        for (i, &flow) in results.flow_data.iter().enumerate() {
-                                            if i < buffer.len() {
-                                                buffer[i] += flow;
-                                            }
+                                if let Some(downstream_node) =
+                                    topology.nodes.get(&node.downstream_id)
+                                {
+                                    let mut buffer =
+                                        downstream_node.inflow_storage.lock().map_err(|e| {
+                                            anyhow::anyhow!(
+                                                "Failed to lock downstream buffer: {}",
+                                                e
+                                            )
+                                        })?;
+                                    if buffer.is_empty() {
+                                        buffer.resize(results.flow_data.len(), 0.0);
+                                    }
+                                    for (i, &flow) in results.flow_data.iter().enumerate() {
+                                        if i < buffer.len() {
+                                            buffer[i] += flow;
                                         }
                                     }
                                 }
@@ -401,7 +399,7 @@ fn worker_thread(
 pub fn process_routing_parallel(
     kernel: MuskingumCungeKernel,
     topology: Arc<NetworkTopology>,
-    channel_params_map: Arc<HashMap<u32, ChannelParams>>,
+    channel_params_map: Arc<FxHashMap<u32, ChannelParams>>,
     max_timesteps: usize,
     dt: f32,
     downsampling: usize,
